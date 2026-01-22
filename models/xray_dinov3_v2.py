@@ -855,8 +855,6 @@ class TraumaNetDINOv3V2(nn.Module):
 
         # 分割预测
         seg_preds_flat = self.seg_head(patch_tokens)
-
-        seg_preds_flat = self.seg_head(patch_tokens)
         seg_preds = {organ: output for organ, output in seg_preds_flat.items()}
 
         return {
