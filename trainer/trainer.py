@@ -144,16 +144,27 @@ class TraumaTrainer:
             self.logger.info(f"    flip_prob: {train_transform.flip_prob}")
             self.logger.info(f"    rotate_prob: {train_transform.rotate_prob}")
 
-        # 准备数据集参数
-        dataset_kwargs = {
-            'image_dir': self.config.data.image_dir,
-            'mask_dir': self.config.data.mask_dir,
-            'target_shape': self.config.data.target_shape,
-            'window_center': self.config.data.window_center,
-            'window_width': self.config.data.window_width,
-            'organ_labels': self.config.data.organ_labels,
-            'use_preprocessed': use_preprocessed
-        }
+        # 准备数据集参数（根据数据集类型不同而不同）
+        if dataset_class_name == 'XrayDataset':
+            # XrayDataset使用不同的参数
+            dataset_kwargs = {
+                'image_dir': self.config.data.image_dir,
+                'mask_dir': self.config.data.mask_dir,
+                'target_shape': self.config.data.target_shape,
+                'use_preprocessed': use_preprocessed,
+                'single_mask': getattr(self.config.data, 'single_mask', True),
+                'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
+            }
+        else:
+            dataset_kwargs = {
+                'image_dir': self.config.data.image_dir,
+                'mask_dir': self.config.data.mask_dir,
+                'target_shape': self.config.data.target_shape,
+                'window_center': self.config.data.window_center,
+                'window_width': self.config.data.window_width,
+                'organ_labels': self.config.data.organ_labels,
+                'use_preprocessed': use_preprocessed
+            }
 
         # 如果是Slice Attention数据集，添加dilation_pixels参数
         if dataset_class_name == 'TraumaDatasetSliceAttention':
@@ -230,12 +241,16 @@ class TraumaTrainer:
             window_size = getattr(self.config.model, 'window_size', 7)
             use_task_interaction = getattr(self.config.model, 'use_task_interaction', True)
             dropout = getattr(self.config.model, 'dropout', 0.1)
+            enable_segmentation = getattr(self.config.model, 'enable_segmentation', True)
 
             self.logger.info(f"  模型类型: DINOv3 V2 (改进版)")
             self.logger.info(f"  ViT架构: {vit_arch}")
             self.logger.info(f"  Top-K比例: {top_k_ratio}")
             self.logger.info(f"  Transformer层数: 局部{num_local_layers} + 全局{num_global_layers}")
             self.logger.info(f"  Dropout: {dropout}")
+            self.logger.info(f"  启用分割: {enable_segmentation}")
+            if enable_segmentation:
+                self.logger.info(f"  分割器官: {self.config.model.seg_organs}")
 
             model = TraumaNetDINOv3V2(
                 vit_arch=vit_arch,
@@ -249,6 +264,7 @@ class TraumaTrainer:
                 use_task_interaction=use_task_interaction,
                 dropout=dropout,
                 seg_organs=self.config.model.seg_organs,
+                enable_segmentation=enable_segmentation,
             )
         elif model_type == 'dinov3':
             # DINOv3模型

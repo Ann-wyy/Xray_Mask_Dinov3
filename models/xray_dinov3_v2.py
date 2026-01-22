@@ -647,6 +647,7 @@ class TraumaNetDINOv3V2(nn.Module):
         dropout: float = 0.1,
         # 分割配置
         seg_organs: Optional[List[str]] = None,
+        enable_segmentation: bool = True,  # 新增：是否启用分割功能
     ):
         super().__init__()
 
@@ -656,10 +657,12 @@ class TraumaNetDINOv3V2(nn.Module):
         self.num_groups = input_depth // self.num_slices_per_group
         self.freeze_backbone = freeze_backbone
         self.batch_forward_size = batch_forward_size
+        self.enable_segmentation = enable_segmentation  # 保存配置
 
+        # 支持单一骨骼分割或多器官分割
         if seg_organs is None:
-            seg_organs = ['liver', 'spleen', 'kidney', 'bowel']
-        self.seg_organs = seg_organs
+            seg_organs = ['bone']  # 默认为骨骼分割
+        self.seg_organs = seg_organs if enable_segmentation else []
 
         # 分类任务
         self.task_names = [
@@ -692,12 +695,15 @@ class TraumaNetDINOv3V2(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # 4. 【改进1+2】分割引导的特征聚合
-        self.seg_guided_aggregator = SegmentationGuidedAggregator(
-            embed_dim=self.embed_dim,
-            num_organs=len(seg_organs),
-            top_k_ratio=top_k_ratio,
-        )
+        # 4. 【改进1+2】分割引导的特征聚合（仅在启用分割时创建）
+        if enable_segmentation and len(self.seg_organs) > 0:
+            self.seg_guided_aggregator = SegmentationGuidedAggregator(
+                embed_dim=self.embed_dim,
+                num_organs=len(self.seg_organs),
+                top_k_ratio=top_k_ratio,
+            )
+        else:
+            self.seg_guided_aggregator = None
 
         # 5. 【改进2】多尺度Top-K选择器 (额外的特征)
         self.topk_selector = TopKPatchSelector(
@@ -706,9 +712,10 @@ class TraumaNetDINOv3V2(nn.Module):
             scale_ratios=[0.05, 0.1, 0.2],
         )
 
-        # 6. Slice特征融合 (seg_guided + topk + cls)
+        # 6. Slice特征融合 (根据是否启用分割调整输入维度)
+        fusion_input_dim = self.embed_dim * 3 if enable_segmentation else self.embed_dim * 2
         self.slice_feature_fusion = nn.Sequential(
-            nn.Linear(self.embed_dim * 3, self.embed_dim),
+            nn.Linear(fusion_input_dim, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -749,13 +756,16 @@ class TraumaNetDINOv3V2(nn.Module):
                 'bowel': self._make_slice_head(dropout),
             })
 
-        # 9. 分割头
-        self.seg_head = PatchBasedSegmentationHead(
-            embed_dim=self.embed_dim,
-            patch_size=16,
-            img_size=img_size,
-            organ_names=seg_organs,
-        )
+        # 9. 分割头（仅在启用分割时创建）
+        if enable_segmentation and len(self.seg_organs) > 0:
+            self.seg_head = PatchBasedSegmentationHead(
+                embed_dim=self.embed_dim,
+                patch_size=16,
+                img_size=img_size,
+                organ_names=self.seg_organs,
+            )
+        else:
+            self.seg_head = None
 
         # 初始化和冻结
         self._init_weights()
@@ -835,27 +845,37 @@ class TraumaNetDINOv3V2(nn.Module):
 
         cls_features_reduced = self.dim_reduction(cls_features)  # (B, embed_dim)
 
+        # 根据是否启用分割来处理特征融合
+        if self.enable_segmentation and self.seg_guided_aggregator is not None:
+            # 分割引导的特征聚合
+            seg_guided_features, aux_seg_logits = self.seg_guided_aggregator(
+                patch_tokens, return_seg_logits=True
+            )  # (B*num_groups, embed_dim), (B*num_groups, num_patches, num_organs)
 
-        # 分割引导的特征聚合
-        seg_guided_features, aux_seg_logits = self.seg_guided_aggregator(
-            patch_tokens, return_seg_logits=True
-        )  # (B*num_groups, embed_dim), (B*num_groups, num_patches, num_organs)
+            # 多尺度Top-K特征
+            topk_features = self.topk_selector(patch_tokens)  # (B*num_groups, embed_dim)
 
-        # 多尺度Top-K特征
-        topk_features = self.topk_selector(patch_tokens)  # (B*num_groups, embed_dim)
-
-        # 融合特征
-        volume_features = self.slice_feature_fusion(
-            torch.cat([cls_features_reduced, seg_guided_features, topk_features], dim=-1)
-        )
-
+            # 融合特征 (包含分割引导特征)
+            volume_features = self.slice_feature_fusion(
+                torch.cat([cls_features_reduced, seg_guided_features, topk_features], dim=-1)
+            )
+        else:
+            # 不使用分割：仅融合cls和topk特征
+            aux_seg_logits = None
+            topk_features = self.topk_selector(patch_tokens)  # (B*num_groups, embed_dim)
+            volume_features = self.slice_feature_fusion(
+                torch.cat([cls_features_reduced, topk_features], dim=-1)
+            )
 
         # Attention-based分类
         volume_preds = self.classification_head(volume_features, slice_features=None)
 
-        # 分割预测
-        seg_preds_flat = self.seg_head(patch_tokens)
-        seg_preds = {organ: output for organ, output in seg_preds_flat.items()}
+        # 分割预测（仅在启用分割时）
+        if self.enable_segmentation and self.seg_head is not None:
+            seg_preds_flat = self.seg_head(patch_tokens)
+            seg_preds = {organ: output for organ, output in seg_preds_flat.items()}
+        else:
+            seg_preds = {}
 
         return {
             'cls_logits': volume_preds,

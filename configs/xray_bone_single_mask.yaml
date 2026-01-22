@@ -1,0 +1,132 @@
+# X-ray骨平片配置文件 - 单一骨骼分割
+# ============================================================
+# 适用于：2D X-ray骨平片，单一骨骼mask（不分多个器官）
+# 分割任务：背景 vs 骨骼（二分类）
+# 分类任务：骨折、脱位等多任务分类
+
+# 实验配置
+exp_name: "xray_bone_dinov3_v2"
+seed: 42
+device: "cuda"
+
+# 数据配置
+data:
+  dataset_class: "XrayDataset"  # 使用XrayBoneDataset
+
+  # 数据路径
+  image_dir: "/path/to/xray/images"      # X-ray图像目录（.png或.jpg）
+  mask_dir: "/path/to/xray/masks"        # mask目录（.png或.npz）
+  train_dataset: "/path/to/labels/train.csv"  # CSV标签文件
+  val_dataset: "/path/to/labels/val.csv"
+  test_dataset: "/path/to/labels/test.csv"
+
+  # Mask配置
+  single_mask: true      # 使用单一骨骼mask（不是多器官字典）
+  mask_key: "bone"       # mask的键名（如果使用.npz文件）
+
+  # 数据预处理
+  target_shape: [512, 512]  # 2D图像大小 (H, W)
+
+  # 数据增强
+  use_augmentation: true
+  flip_prob: 0.5
+  rotate_prob: 0.3
+  max_angle: 15  # 旋转角度范围 ±15°
+
+  # 数据加载
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: false
+  use_preprocessed: false
+
+# 模型配置
+model:
+  # 使用DINOv3 V2改进版
+  model_type: "dinov3_v2"
+  backbone: "dinov3_vit_base"
+
+  # DINOv3 backbone配置
+  vit_arch: "vit_base"  # vit_small, vit_base, vit_large, vit_giant
+  dinov3_pretrained: "/path/to/dinov3_vitb16_pretrain.pth"  # DINOv3预训练权重
+
+  # 输入配置（2D X-ray）
+  input_depth: 1  # 2D图像
+
+  # 分割配置
+  enable_segmentation: true      # 启用分割功能
+  seg_organs: ["bone"]           # 单一骨骼分割（不是多器官）
+
+  # 【改进1+2】分割引导 + Top-K聚合配置
+  top_k_ratio: 0.2
+
+  # 【改进3】层次化Slice Transformer配置
+  num_local_layers: 2
+  num_global_layers: 2
+  window_size: 7
+
+  # 【改进4】Attention分类头配置
+  use_task_interaction: true
+
+  # 分类任务配置（根据实际任务修改）
+  num_classes:
+    femur_fracture: 2       # 股骨骨折
+    pelvis_fracture: 2      # 骨盆骨折
+    spine_fracture: 2       # 脊柱骨折
+    joint_dislocation: 2    # 关节脱位
+
+  # Dropout
+  dropout: 0.1
+
+# 训练配置
+training:
+  batch_size: 8
+  epochs: 50
+
+  # 优化器
+  optimizer: "adamw"
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+  # 学习率调度
+  scheduler: "cosine"
+  min_lr: 1.0e-6
+
+  # 损失函数
+  loss_type: "BCE"  # BCE, BCE_weight, BCE_Focal
+  focal_loss_alpha: 0.25
+  focal_loss_gamma: 2.0
+
+  # 多任务损失权重
+  seg_loss_weight: 0.5  # 分割损失权重
+
+  # 分类任务权重（可选，用于处理类别不平衡）
+  class_weights: {}
+
+  # 训练策略
+  use_amp: true
+  gradient_clip: 1.0
+
+  # 验证与保存
+  save_interval: 5
+
+# 日志配置
+log:
+  log_dir: "./logs/xray_bone"
+  checkpoint_dir: "./checkpoints/xray_bone"
+  tensorboard_dir: "./runs/xray_bone"
+  save_best: true
+  metric_for_best: "avg_f1"
+
+
+# ============================================================
+# CSV标签文件格式示例 (train.csv, val.csv, test.csv):
+# ============================================================
+# patient_id,femur_fracture,pelvis_fracture,spine_fracture,joint_dislocation
+# patient001,1,0,0,0
+# patient002,0,1,1,0
+# patient003,0,0,0,1
+#
+# Mask文件格式:
+# - 单一.png文件: masks/patient001.png (二值图像，0=背景，255=骨骼)
+# - 或.npz文件: masks/patient001.npz (包含key='bone'的mask数组)
