@@ -13,7 +13,7 @@ parent_dir = os.path.abspath(os.path.join(current_dir, os.pardir))
 sys.path.append(parent_dir)
 
 from utils.config_utils import load_config, save_config
-from trainer.trauma_trainer import TraumaTrainer
+from trainer.trainer import TraumaTrainer
 
 
 def main():

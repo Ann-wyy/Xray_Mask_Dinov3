@@ -26,7 +26,7 @@ from utils.losses import MultiTaskLoss
 from utils.metrics import MultiTaskMetrics
 from utils.logger import get_logger
 from data.transforms import get_train_transform
-from data.xray_dataset import XrayDataset
+from data.xraydataset import XrayBoneDataset as XrayDataset
 
 
 
