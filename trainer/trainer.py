@@ -15,18 +15,21 @@ import numpy as np
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.trauma_net_25d import TraumaNet25D
-from models.trauma_net_slice_attention import TraumaNetSliceAttention
-from models.trauma_net_dinov3 import TraumaNetDINOv3SliceAttention
-from models.trauma_net_dinov3_v2 import TraumaNetDINOv3V2
-from data.trauma_dataset import TraumaDataset
-from data.trauma_dataset_2task import TraumaDataset2Task
-from data.trauma_dataset_slice_attention import TraumaDatasetSliceAttention
+# 导入已存在的模块
+from models.xray_dinov3_v2 import TraumaNetDINOv3V2
+from data.xraydataset import XrayBoneDataset as XrayDataset
 from utils.losses import MultiTaskLoss
 from utils.metrics import MultiTaskMetrics
 from utils.logger import get_logger
 from data.transforms import get_train_transform
-from data.xraydataset import XrayBoneDataset as XrayDataset
+
+# 注意：以下模块未实现，如需要请自行添加
+# from models.trauma_net_25d import TraumaNet25D
+# from models.trauma_net_slice_attention import TraumaNetSliceAttention
+# from models.trauma_net_dinov3 import TraumaNetDINOv3SliceAttention
+# from data.trauma_dataset import TraumaDataset
+# from data.trauma_dataset_2task import TraumaDataset2Task
+# from data.trauma_dataset_slice_attention import TraumaDatasetSliceAttention
 
 
 
@@ -126,16 +129,17 @@ class TraumaTrainer:
         # 获取use_preprocessed参数（默认False）
         use_preprocessed = getattr(self.config.data, 'use_preprocessed', False)
 
-        # 获取dataset_class参数（默认使用TraumaDataset）
-        dataset_class_name = getattr(self.config.data, 'dataset_class', 'TraumaDataset')
-        if dataset_class_name == 'TraumaDataset2Task':
-            DatasetClass = TraumaDataset2Task
-        elif dataset_class_name == 'TraumaDatasetSliceAttention':
-            DatasetClass = TraumaDatasetSliceAttention
-        elif dataset_class_name == 'XrayDataset':            # 新增
+        # 获取dataset_class参数（默认使用XrayDataset）
+        dataset_class_name = getattr(self.config.data, 'dataset_class', 'XrayDataset')
+        if dataset_class_name == 'XrayDataset':
             DatasetClass = XrayDataset
         else:
-            DatasetClass = TraumaDataset
+            # 如果指定了其他数据集类，抛出错误提示
+            raise ValueError(
+                f"不支持的数据集类: {dataset_class_name}。"
+                f"当前仅支持 'XrayDataset'。"
+                f"如需要其他数据集，请自行实现并添加导入。"
+            )
 
         # 创建数据增强（仅用于训练集）
         train_transform = get_train_transform(self.config)
@@ -217,8 +221,8 @@ class TraumaTrainer:
 
     def _create_model(self):
         """创建模型"""
-        # 获取模型类型（默认cnn）
-        model_type = getattr(self.config.model, 'model_type', 'cnn')
+        # 获取模型类型（默认dinov3_v2）
+        model_type = getattr(self.config.model, 'model_type', 'dinov3_v2')
 
         if model_type == 'dinov3_v2':
             # DINOv3 V2 改进版模型
@@ -250,39 +254,12 @@ class TraumaTrainer:
                 dropout=dropout,
                 seg_organs=self.config.model.seg_organs,
             )
-        elif model_type == 'dinov3':
-            # DINOv3模型
-            vit_arch = getattr(self.config.model, 'vit_arch', 'vit_base')
-            dinov3_pretrained = getattr(self.config.model, 'dinov3_pretrained', None)
-
-            self.logger.info(f"  模型类型: DINOv3")
-            self.logger.info(f"  ViT架构: {vit_arch}")
-
-            model = TraumaNetDINOv3SliceAttention(
-                vit_arch=vit_arch,
-                pretrained_path=dinov3_pretrained,
-                img_size=self.config.data.target_shape[0],
-                input_depth=self.config.model.input_depth,
-                seg_organs=self.config.model.seg_organs,
-            )
         else:
-            # CNN模型（原有逻辑）
-            pretrained_weight = None
-            if hasattr(self.config.model, 'pretrained_weight'):
-                pretrained_weight = self.config.model.pretrained_weight
-                if pretrained_weight and pretrained_weight.strip():
-                    self.logger.info(f"  使用本地预训练权重: {pretrained_weight}")
-                else:
-                    pretrained_weight = None
-
-            model = TraumaNet25D(
-                backbone=self.config.model.backbone,
-                pretrained=self.config.model.pretrained,
-                pretrained_weight=pretrained_weight,
-                num_classes_dict=self.config.model.num_classes,
-                seg_organs=self.config.model.seg_organs,
-                input_depth=self.config.model.input_depth,
-                target_size=(self.config.data.target_shape[0], self.config.data.target_shape[1])
+            # 不支持的模型类型
+            raise ValueError(
+                f"不支持的模型类型: {model_type}。"
+                f"当前仅支持 'dinov3_v2'。"
+                f"如需要其他模型，请自行实现并添加导入。"
             )
 
         model = model.to(self.device)

@@ -1,0 +1,119 @@
+# Xray Mask DINOv3 配置文件
+# 用于X-ray图像分割和分类任务
+
+# 实验配置
+exp_name: "xray_dinov3_experiment"
+device: "cuda"  # cuda 或 cpu
+
+# 数据配置
+data:
+  # 数据路径
+  image_dir: "data/images"           # X-ray图像目录
+  mask_dir: "data/masks"             # 分割mask目录
+  train_dataset: "data/train.csv"    # 训练集标签文件（如果使用CSV格式）
+  val_dataset: "data/val.csv"        # 验证集标签文件
+  test_dataset: "data/test.csv"      # 测试集标签文件
+
+  # 图像配置
+  target_shape: [512, 512]           # 输入图像大小 [H, W]
+  window_center: 50                  # CT窗位（X-ray可忽略）
+  window_width: 400                  # CT窗宽（X-ray可忽略）
+
+  # 数据加载配置
+  num_workers: 4                     # DataLoader工作进程数
+  pin_memory: true                   # 是否使用pin_memory加速
+  prefetch_factor: 2                 # 预取因子
+  persistent_workers: false          # 是否保持工作进程
+
+  # 数据增强配置
+  augmentation:
+    enabled: true                    # 是否启用数据增强
+    flip_prob: 0.5                   # 水平翻转概率
+    rotate_prob: 0.5                 # 旋转概率
+    max_rotation_angle: 15.0         # 最大旋转角度（度）
+    brightness_contrast_prob: 0.3    # 亮度对比度调整概率
+    brightness_range: [0.8, 1.2]     # 亮度调整范围
+    contrast_range: [0.8, 1.2]       # 对比度调整范围
+
+  # 器官标签（用于分割和分类）
+  organ_labels:
+    - liver
+    - spleen
+    - kidney
+    - bowel
+
+  # 数据集类型（根据项目选择）
+  dataset_class: "XrayDataset"       # XrayDataset, TraumaDataset等
+  use_preprocessed: false            # 是否使用预处理后的数据
+
+# 模型配置
+model:
+  model_type: "dinov3_v2"            # 模型类型: dinov3_v2, dinov3, cnn
+
+  # DINOv3配置
+  vit_arch: "vit_base"               # ViT架构: vit_small, vit_base, vit_large
+  dinov3_pretrained: null            # DINOv3预训练权重路径（null则从torch.hub下载）
+
+  # 模型参数
+  input_depth: 1                     # 输入深度（X-ray为1）
+  dropout: 0.1                       # Dropout率
+
+  # DINOv3 V2特定配置
+  top_k_ratio: 0.2                   # Top-K patch选择比例
+  num_local_layers: 2                # 局部Transformer层数
+  num_global_layers: 2               # 全局Transformer层数
+  window_size: 7                     # 局部注意力窗口大小
+  use_task_interaction: true         # 是否使用任务间交互
+
+  # 分割器官
+  seg_organs:
+    - liver
+    - spleen
+    - kidney
+    - bowel
+
+  # 分类任务类别数（所有任务都是二分类）
+  num_classes:
+    liver_injury: 2
+    liver_high_risk: 2
+    spleen_injury: 2
+    spleen_high_risk: 2
+    kidney_injury: 2
+    kidney_high_risk: 2
+    bowel: 2
+    extravasation: 2
+
+# 训练配置
+training:
+  # 基础训练参数
+  batch_size: 2                      # 批次大小（根据GPU内存调整）
+  epochs: 50                         # 训练轮数
+  lr: 0.0001                         # 学习率
+  min_lr: 0.00001                    # 最小学习率
+  weight_decay: 0.0001               # 权重衰减
+  momentum: 0.9                      # SGD动量（如果使用SGD）
+
+  # 优化器和调度器
+  optimizer: "adamw"                 # 优化器: adam, adamw, sgd
+  scheduler: "cosine"                # 学习率调度器: cosine, step, plateau
+
+  # 损失函数配置
+  loss_type: "BCE"                   # 损失类型: BCE, BCE_weight, BCE_Focal
+  focal_loss_alpha: 0.25             # Focal Loss alpha参数
+  focal_loss_gamma: 2.0              # Focal Loss gamma参数
+  label_smoothing: 0.0               # 标签平滑
+  seg_loss_weight: 0.5               # 分割损失权重
+
+  # 类别权重（可选，用于处理类别不平衡）
+  class_weights: null
+
+  # 训练技巧
+  use_amp: false                     # 是否使用混合精度训练
+  gradient_clip: 1.0                 # 梯度裁剪阈值（0表示不裁剪）
+  save_interval: 5                   # 保存检查点间隔（epoch）
+
+# 日志配置
+log:
+  log_dir: "outputs/logs"
+  checkpoint_dir: "outputs/checkpoints"
+  tensorboard_dir: "outputs/tensorboard"

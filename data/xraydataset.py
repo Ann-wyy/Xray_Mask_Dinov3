@@ -61,33 +61,62 @@ class XrayBoneDataset(Dataset):
         image_dir: 图像目录
         mask_dir: mask目录（.npz或字典文件）
         label_dict: {patient_id: {task_name: label}}，直接传入标签字典
+        label_file: CSV标签文件路径（可选，如提供则从CSV加载标签）
         target_shape: 输出影像和mask大小 (H, W)
         transform: 数据增强
         mode: 'train', 'val', 'test'
         use_preprocessed: 是否跳过归一化和resize
+        organ_labels: 器官标签列表（用于兼容性，可选）
+        window_center: CT窗位（X-ray可忽略）
+        window_width: CT窗宽（X-ray可忽略）
     """
     def __init__(
         self,
         image_dir: str,
         mask_dir: str,
-        label_dict: Dict[str, Dict[str, int]],
+        label_dict: Dict[str, Dict[str, int]] = None,
+        label_file: str = None,
         target_shape: tuple = (512, 512),
         transform=None,
         mode: str = 'train',
-        use_preprocessed: bool = False
+        use_preprocessed: bool = False,
+        organ_labels: list = None,
+        window_center: int = None,
+        window_width: int = None,
+        **kwargs  # 接受其他可选参数
     ):
+        import pandas as pd
+
         self.image_dir = image_dir
         self.mask_dir = mask_dir
-        self.label_dict = label_dict
         self.target_shape = target_shape
         self.transform = transform
         self.mode = mode
         self.use_preprocessed = use_preprocessed
 
+        # 加载标签
+        if label_dict is not None:
+            self.label_dict = label_dict
+            self.labels_df = None
+        elif label_file is not None:
+            # 从CSV文件加载标签
+            df = pd.read_csv(label_file)
+            self.labels_df = df  # 保存DataFrame用于统计
+
+            # 构建标签字典
+            self.label_dict = {}
+            for _, row in df.iterrows():
+                patient_id = str(row['patient_id'])
+                # 提取所有分类标签列
+                label_cols = [col for col in df.columns if col != 'patient_id']
+                self.label_dict[patient_id] = {col: int(row[col]) for col in label_cols}
+        else:
+            raise ValueError("必须提供 label_dict 或 label_file 参数之一")
+
         # MONAI 2D resize transform
         self.resize_transform = MonaiResize(spatial_size=target_shape, mode="bilinear")
 
-        self.patient_ids = list(label_dict.keys())
+        self.patient_ids = list(self.label_dict.keys())
         print(f"[{mode}] 加载了 {len(self.patient_ids)} 个样本")
 
     def __len__(self):
