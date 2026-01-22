@@ -14,12 +14,12 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.trauma_net_dinov3 import TraumaNetDINOv3
-from data.trauma_dataset import TraumaDataset
+from models.xray_dinov3_v2 import TraumaNetDINOv3
+from data.xraydataset import XrayBoneDataset
 from utils.losses import MultiTaskLoss
 from utils.metrics import MultiTaskMetrics
 from utils.logger import get_logger
-from data.transforms import get_train_transform
+from data.xraydataset import RandomFlipRotate2D
 
 
 class TraumaTrainer:
@@ -80,7 +80,7 @@ class TraumaTrainer:
 
     def _create_dataloaders(self):
         """创建训练、验证和测试数据加载器"""
-        train_transform = get_train_transform(self.config)
+        train_transform = RandomFlipRotate2D(flip_prob=0.5, max_angle=15)
         dataset_kwargs = {
             'image_dir': self.config.data.image_dir,
             'mask_dir': self.config.data.mask_dir,
@@ -89,18 +89,18 @@ class TraumaTrainer:
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
         }
 
-        train_dataset = TraumaDataset(
+        train_dataset = XrayBoneDataset(
             label_file=self.config.data.train_dataset,
             mode='train',
             transform=train_transform,
             **dataset_kwargs
         )
-        val_dataset = TraumaDataset(
+        val_dataset = XrayBoneDataset(
             label_file=self.config.data.val_dataset,
             mode='val',
             **dataset_kwargs
         )
-        test_dataset = TraumaDataset(
+        test_dataset = XrayBoneDataset(
             label_file=self.config.data.test_dataset,
             mode='test',
             **dataset_kwargs
