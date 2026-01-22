@@ -1,0 +1,128 @@
+# TraumaNet DINOv3 V2 配置文件
+# ============================================================
+# 改进版DINOv3模型：
+# 1. 分割引导的特征聚合
+# 2. Top-K Patch聚合 (小病灶/散发病灶)
+# 3. 层次化Slice Transformer (4层)
+# 4. Attention-based分类头
+
+# 实验配置
+exp_name: "dinov3_v2_focal"
+seed: 42
+device: "cuda"
+
+# 数据配置
+data:
+  dataset_class: "TraumaDatasetSliceAttention"
+
+  # 数据路径
+  image_dir: "/data/dataserver03/data/zchao/trauma_nii"
+  mask_dir: "/data/dataserver03/data/zchao/trauma_mask"
+  train_dataset: "/data/dataserver03/code/zhangruipeng/TraumsNet/code/data/labels/preprocessed/train.csv"
+  val_dataset: "/data/dataserver03/code/zhangruipeng/TraumsNet/code/data/labels/preprocessed/val.csv"
+  test_dataset: "/data/dataserver03/code/zhangruipeng/TraumsNet/code/data/labels/preprocessed/test.csv"
+
+  # 数据预处理
+  target_shape: [512, 512, 240]
+  target_spacing: [1.0, 1.0, 2.0]
+
+
+  # 数据增强
+  use_augmentation: true
+  flip_prob: 0.5
+  rotate_prob: 0.3
+  scale_range: [0.9, 1.1]
+
+  # 数据加载
+  num_workers: 8
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  use_preprocessed: true
+
+# 模型配置
+model:
+  # 使用DINOv3 V2改进版
+  model_type: "dinov3_v2"
+  backbone: "dinov3_vit_base"  # 兼容trainer日志
+
+  # DINOv3 backbone配置
+  vit_arch: "vit_base"
+  dinov3_pretrained: "/data/dataserver01/zhangruipeng/code/BrainFM/pretrain/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+
+
+
+  # 【改进1+2】分割引导 + Top-K聚合配置
+  top_k_ratio: 0.2  # 选择top 20%的patches
+
+  # 【改进3】层次化Slice Transformer配置
+  num_local_layers: 2   # 局部窗口注意力层数
+  num_global_layers: 2  # 全局注意力层数
+  window_size: 7        # 局部窗口大小
+
+  # 【改进4】Attention分类头配置
+  use_task_interaction: true  # 任务间信息交互
+
+  # Volume级别分类任务
+  num_classes:
+    liver_injury: 2
+    liver_high_risk: 2
+    spleen_injury: 2
+    spleen_high_risk: 2
+    kidney_injury: 2
+    kidney_high_risk: 2
+    bowel: 2
+    extravasation: 2
+
+  # 分割任务配置
+  num_seg_classes: 2
+
+  # Dropout (增加正则化)
+  dropout: 0.3
+
+# 训练配置
+training:
+  batch_size: 1
+  epochs: 30
+
+  # 优化器
+  optimizer: "adamw"
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  momentum: 0.9
+
+  # 学习率调度
+  scheduler: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-6
+
+  # 损失函数 - 使用Focal Loss
+  loss_type: "BCE_Focal"
+  focal_loss_alpha: 0.25
+  focal_loss_gamma: 2.0
+
+  # Label Smoothing (防止过拟合)
+  label_smoothing: 0.1
+
+  # 多任务损失权重
+  seg_loss_weight: 0.3
+
+  # 训练策略
+  use_amp: true
+  gradient_clip: 1.0
+  accumulation_steps: 1
+
+  # 验证与保存
+  val_interval: 1
+  save_interval: 5
+  early_stopping_patience: 15
+
+# 日志配置
+log:
+  log_dir: "./logs"
+  checkpoint_dir: "./checkpoints"
+  tensorboard_dir: "./runs"
+  print_freq: 10
+  log_freq: 50
+  save_best: true
+  metric_for_best: "avg_auc"
