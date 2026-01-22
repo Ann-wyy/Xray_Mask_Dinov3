@@ -14,7 +14,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.trauma_net_dinov3 import TraumaNetDINOv3
+from models.xray_dinov3_v2 import TraumaNetDINOv3
 from data.trauma_dataset import TraumaDataset
 from utils.losses import MultiTaskLoss
 from utils.metrics import MultiTaskMetrics
