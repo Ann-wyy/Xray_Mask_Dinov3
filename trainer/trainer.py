@@ -85,8 +85,9 @@ class TraumaTrainer:
             'image_dir': self.config.data.image_dir,
             'mask_dir': self.config.data.mask_dir,
             'target_shape': self.config.data.target_shape,
-            'organ_labels': self.config.data.organ_labels,
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
+            'single_mask': getattr(self.config.data, 'single_mask', True),
+            'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
         }
 
         train_dataset = XrayBoneDataset(
