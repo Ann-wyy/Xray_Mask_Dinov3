@@ -119,14 +119,14 @@ class XrayBoneDataset(Dataset):
         print(f"[{mode}] 加载了 {len(self.patient_ids)} 个样本")
 
     def _load_labels_from_csv(self) -> Dict[str, Dict[str, int]]:
-        """从CSV加载标签并转换为字典格式"""
+        """从CSV加载标签并转换为字典格式，自动跳过非数值列（如路径列）"""
         label_dict = {}
+        # 只选择数值类型的列作为标签列
+        label_cols = [col for col in self.labels_df.columns
+                      if col != 'patient_id' and pd.api.types.is_numeric_dtype(self.labels_df[col])]
         for _, row in self.labels_df.iterrows():
             patient_id = str(row['patient_id'])
-            labels = {}
-            for col in self.labels_df.columns:
-                if col != 'patient_id':
-                    labels[col] = int(row[col])
+            labels = {col: int(row[col]) for col in label_cols}
             label_dict[patient_id] = labels
         return label_dict
 
