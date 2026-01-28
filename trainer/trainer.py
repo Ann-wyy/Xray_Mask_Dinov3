@@ -1,5 +1,5 @@
 """
-TraumaNet 训练器类（单张RGB+DINOv3）
+TraumaNet 训练器类（2D X-ray + DINOv3, 分类 + 分割）
 """
 
 import os
@@ -25,7 +25,7 @@ from data.xraydataset import RandomFlipRotate2D
 class TraumaTrainer:
     """
     TraumaNet训练器
-    适用于单张RGB图像 + DINOv3分类/分割
+    适用于2D X-ray图像 + DINOv3分类/分割多任务学习
     """
 
     def __init__(self, config, device: str = 'cuda'):
@@ -36,8 +36,14 @@ class TraumaTrainer:
         log_file = os.path.join(config.log.log_dir, 'log.txt')
         self.logger = get_logger(log_file, file_save=True, display=True)
         self.logger.info("=" * 60)
-        self.logger.info("TraumaNet 训练器初始化")
+        self.logger.info("TraumaNet 训练器初始化 (2D模式)")
         self.logger.info(f"实验名称: {config.exp_name}, 设备: {self.device}")
+
+        # 从配置中获取分类任务名称和分割器官名称
+        self.task_names = list(config.model.num_classes.keys())
+        self.organ_names = list(getattr(config.model, 'seg_organs', ['mask']))
+        self.logger.info(f"分类任务: {self.task_names}")
+        self.logger.info(f"分割目标: {self.organ_names}")
 
         # 数据加载器
         self.train_loader, self.val_loader, self.test_loader = self._create_dataloaders()
@@ -57,11 +63,10 @@ class TraumaTrainer:
         # 学习率调度器
         self.scheduler = self._create_scheduler()
 
-        # 指标
-        organ_names = list(config.model.num_classes.keys())
-        self.train_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.val_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.test_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
+        # 指标（使用配置中的任务名称和器官名称）
+        self.train_metrics = MultiTaskMetrics(self.task_names, config.model.num_classes, seg_organ_names=self.organ_names)
+        self.val_metrics = MultiTaskMetrics(self.task_names, config.model.num_classes, seg_organ_names=self.organ_names)
+        self.test_metrics = MultiTaskMetrics(self.task_names, config.model.num_classes, seg_organ_names=self.organ_names)
 
         # TensorBoard
         self.writer = SummaryWriter(config.log.tensorboard_dir)
@@ -75,7 +80,6 @@ class TraumaTrainer:
         self.use_amp = config.training.use_amp
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
 
-
         self.logger.info("训练器初始化完成！")
         self.logger.info("=" * 60)
 
@@ -85,10 +89,10 @@ class TraumaTrainer:
         dataset_kwargs = {
             'image_dir': self.config.data.image_dir,
             'mask_dir': self.config.data.mask_dir,
-            'target_shape': self.config.data.target_shape,
+            'target_shape': tuple(self.config.data.target_shape),
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
             'single_mask': getattr(self.config.data, 'single_mask', True),
-            'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
+            'mask_key': getattr(self.config.data, 'mask_key', 'mask'),
         }
 
         train_dataset = XrayBoneDataset(
@@ -121,15 +125,17 @@ class TraumaTrainer:
         return train_loader, val_loader, test_loader
 
     def _create_model(self):
-        """创建DINOv3模型"""
+        """创建DINOv3 2D模型"""
         cfg_path = getattr(self.config.model, 'cfg_path', 'vit_base')
         pretrained_path = getattr(self.config.model, 'dinov3_pretrained', None)
         top_k_ratio = getattr(self.config.model, 'top_k_ratio', 0.2)
         dropout = getattr(self.config.model, 'dropout', 0.1)
         freeze_backbone = getattr(self.config.model, 'freeze_backbone', False)
         use_n_blocks = getattr(self.config.model, 'use_n_blocks', 4)
+        input_channels = getattr(self.config.model, 'input_depth', 1)
 
-        self.logger.info(f"  模型类型: DINOv3, ViT架构: {cfg_path}")
+        self.logger.info(f"  模型类型: DINOv3 2D, ViT架构: {cfg_path}")
+        self.logger.info(f"  输入通道数: {input_channels}, 图像大小: {self.config.data.target_shape}")
         model = TraumaNetDINOv3(
             cfg_path=cfg_path,
             pretrained_path=pretrained_path,
@@ -138,6 +144,9 @@ class TraumaTrainer:
             top_k_ratio=top_k_ratio,
             dropout=dropout,
             freeze_backbone=freeze_backbone,
+            task_names=self.task_names,
+            organ_names=self.organ_names,
+            input_channels=input_channels,
         )
         return model
 
@@ -180,8 +189,7 @@ class TraumaTrainer:
         epoch_losses = []
 
         for batch in tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}"):
-            images = batch['image'].to(self.device)
-            images = images.repeat(1, 3, 1, 1)
+            images = batch['image'].to(self.device)  # (B, 1, H, W) — 模型内部自动repeat到3通道
             cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
             seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
@@ -216,7 +224,7 @@ class TraumaTrainer:
 
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validation"):
-                images = batch['image'].to(self.device)
+                images = batch['image'].to(self.device)  # (B, 1, H, W) — 模型内部自动repeat到3通道
                 cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
                 seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
@@ -237,7 +245,7 @@ class TraumaTrainer:
 
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Testing"):
-                images = batch['image'].to(self.device)
+                images = batch['image'].to(self.device)  # (B, 1, H, W) — 模型内部自动repeat到3通道
                 cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
                 seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
@@ -250,7 +258,7 @@ class TraumaTrainer:
         metrics = self.test_metrics.compute()
         metrics['loss'] = np.mean(test_losses)
         return metrics
-    
+
     def train(self):
         self.logger.info("开始训练")
         for epoch in range(self.current_epoch, self.config.training.epochs):
@@ -264,6 +272,12 @@ class TraumaTrainer:
             # ---- Validate ----
             val_metrics = self.validate()
             self.logger.info(f"Val metrics: {val_metrics}")
+
+            # ---- TensorBoard ----
+            for k, v in train_metrics.items():
+                self.writer.add_scalar(f'train/{k}', v, epoch)
+            for k, v in val_metrics.items():
+                self.writer.add_scalar(f'val/{k}', v, epoch)
 
             # ---- Scheduler ----
             if self.scheduler is not None:
@@ -301,3 +315,17 @@ class TraumaTrainer:
 
         torch.save(state, path)
 
+    def load_checkpoint(self, checkpoint_path: str):
+        """从检查点恢复训练状态"""
+        self.logger.info(f"加载检查点: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        if isinstance(self.model, nn.DataParallel):
+            self.model.module.load_state_dict(checkpoint['model'])
+        else:
+            self.model.load_state_dict(checkpoint['model'])
+
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.current_epoch = checkpoint['epoch'] + 1
+        self.best_metric = checkpoint.get('best_metric', 0.0)
+        self.logger.info(f"已恢复到 epoch {self.current_epoch}, best_metric={self.best_metric:.4f}")

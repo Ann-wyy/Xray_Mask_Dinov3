@@ -1,13 +1,15 @@
-# X-ray骨平片配置文件 - 单骨骼分割 + DINOv3
+# X-ray 2D 配置文件 — 骨骼分割(mask) + 多任务分类(classification)
 # ============================================================
+# 纯2D模式：单张灰度X-ray → 自动repeat到3通道 → DINOv3 ViT
+# 同时输出：骨骼分割mask + 多个分类标签
 
-exp_name: "xray_bone_dinov3"
+exp_name: "xray_bone_dinov3_2d"
 seed: 42
 device: "cuda"
 
 # 数据配置
 data:
-  dataset_class: "XrayDataset"           # 使用单张X-ray数据集
+  dataset_class: "XrayBoneDataset"          # 2D X-ray 数据集
   image_dir: "/path/to/xray/images"
   mask_dir: "/path/to/xray/masks"
   train_dataset: "/path/to/labels/train.csv"
@@ -15,11 +17,11 @@ data:
   test_dataset: "/path/to/labels/test.csv"
 
   # Mask配置
-  single_mask: true
-  mask_key: "mask"                       # npz文件的键名
+  single_mask: true                         # 单一骨骼mask（非多器官字典）
+  mask_key: "mask"                          # npz文件中mask的key / 单mask时的名称
 
-  # 图像预处理
-  target_shape: [512, 512]               # 输入图像大小
+  # 图像预处理（纯2D）
+  target_shape: [512, 512]                  # 2D输入尺寸
   use_augmentation: true
   flip_prob: 0.5
   rotate_prob: 0.3
@@ -34,25 +36,28 @@ data:
 
 # 模型配置
 model:
-  model_type: "dinov3_v2"               # 使用DINOv3 V2
-  vit_arch: "vit_base"                   # vit_small, vit_base, vit_large, vit_giant
+  model_type: "dinov3_v2"                   # DINOv3 V2 2D模型
+  vit_arch: "vit_base"                      # vit_small / vit_base / vit_large
+  cfg_path: "/path/to/dinov3_vit_base_config.yaml"
   dinov3_pretrained: "/path/to/dinov3_vitb16_pretrain.pth"
-  input_depth: 1                         # 灰度图X-ray
+  input_depth: 1                            # 灰度X-ray（模型内部自动repeat到3通道）
 
   # 分割配置
   enable_segmentation: true
-  seg_organs: ["bone"]                   # 单骨骼分割
+  seg_organs: ["mask"]                      # 分割目标名称列表（与mask_key一致）
 
-  # 分类任务配置
+  # 分类任务配置（全部二分类）
   num_classes:
     femur_fracture: 2
     pelvis_fracture: 2
     spine_fracture: 2
     joint_dislocation: 2
 
-  # 注意力/Top-K特征配置
-  top_k_ratio: 0.2
+  # 模型超参数
+  use_n_blocks: 4                           # 使用backbone最后4层特征
+  top_k_ratio: 0.2                          # Top-K patch选择比例
   dropout: 0.1
+  freeze_backbone: false
   use_task_interaction: true
 
 # 训练配置
@@ -64,19 +69,24 @@ training:
   weight_decay: 1e-4
   scheduler: "cosine"
   min_lr: 1e-6
-  loss_type: "BCE"
+
+  # 损失函数
+  loss_type: "BCE"                          # BCE / BCE_weight / BCE_Focal
   focal_loss_alpha: 0.25
   focal_loss_gamma: 2.0
-  seg_loss_weight: 0.5
+  label_smoothing: 0.0
+  seg_loss_weight: 0.5                      # 分割损失权重（总loss = cls_loss + seg_loss_weight * seg_loss）
   class_weights: {}
-  use_amp: true
+
+  # 训练策略
+  use_amp: true                             # 混合精度训练
   gradient_clip: 1.0
   save_interval: 5
 
 # 日志配置
 log:
-  log_dir: "./logs/xray_bone"
-  checkpoint_dir: "./checkpoints/xray_bone"
-  tensorboard_dir: "./runs/xray_bone"
+  log_dir: "./logs/xray_bone_2d"
+  checkpoint_dir: "./checkpoints/xray_bone_2d"
+  tensorboard_dir: "./runs/xray_bone_2d"
   save_best: true
   metric_for_best: "avg_f1"

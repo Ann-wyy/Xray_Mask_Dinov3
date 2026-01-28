@@ -182,8 +182,8 @@ class MultiTaskLoss(nn.Module):
             if organ in seg_targets:
                 target = seg_targets[organ]
 
-                # 移除通道维度 (B, 1, D, H, W) -> (B, D, H, W)
-                if target.dim() == 5 and target.size(1) == 1:
+                # 移除通道维度: (B, 1, H, W) -> (B, H, W) 或 (B, 1, D, H, W) -> (B, D, H, W)
+                if target.size(1) == 1:
                     target = target.squeeze(1)
 
                 # 计算Dice损失

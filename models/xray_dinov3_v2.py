@@ -1,10 +1,12 @@
 """
+DINOv3 2D X-ray 多任务模型（分类 + 分割）
 
-改进点：
-1. 分割引导的特征聚合 - 用分割预测作为注意力权重
-2. Top-K Patch聚合 - 针对小病灶/散发病灶
-3. 层次化Slice Transformer (4层) - 局部+全局注意力
+特点：
+1. 纯2D输入：单张X-ray灰度图 → 自动repeat到3通道以适配DINOv3
+2. 分割引导的特征聚合 - 用分割预测作为注意力权重
+3. Top-K Patch聚合 - 针对小病灶/散发病灶
 4. Attention-based分类头 - 任务特定query + 交叉注意力
+5. task_names（分类任务）和 organ_names（分割目标）均可通过参数配置
 """
 
 import os
@@ -174,7 +176,7 @@ class AttentionClassificationHead(nn.Module):
         return {name: self.classifiers[name](task_features[:, i]).squeeze(-1) for i, name in enumerate(self.task_names)}
 
 # -----------------------------
-# Patch-based Segmentation Head
+# Patch-based Segmentation Head (2D)
 # -----------------------------
 class PatchBasedSegmentationHead(nn.Module):
     def __init__(self, embed_dim: int = 768, patch_size: int = 16, img_size: int = 512, organ_names: List[str] = ["mask"], num_classes: int = 2):
@@ -195,18 +197,55 @@ class PatchBasedSegmentationHead(nn.Module):
         return {organ: self.seg_heads[organ](x) for organ in self.organ_names}
 
 # -----------------------------
-# 主模型
+# 主模型 (2D X-ray, 支持 mask + classification)
 # -----------------------------
 class TraumaNetDINOv3(nn.Module):
-    def __init__(self, cfg_path: str, pretrained_path: str, img_size: int = 512, use_n_blocks: int = 4, top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
+    """
+    DINOv3 2D多任务模型
+
+    Args:
+        cfg_path: DINOv3 backbone配置文件路径
+        pretrained_path: DINOv3预训练权重路径（保留兼容性，当前未使用）
+        img_size: 输入图像尺寸
+        use_n_blocks: 使用backbone最后n层的特征
+        top_k_ratio: Top-K patch选择比例
+        dropout: Dropout比率
+        freeze_backbone: 是否冻结backbone参数
+        task_names: 分类任务名称列表，如 ['femur_fracture', 'pelvis_fracture']
+        organ_names: 分割目标名称列表，如 ['bone'] 或 ['liver', 'spleen', ...]
+        input_channels: 输入图像通道数（1=灰度，3=RGB）
+    """
+    def __init__(
+        self,
+        cfg_path: str,
+        pretrained_path: str = None,
+        img_size: int = 512,
+        use_n_blocks: int = 4,
+        top_k_ratio: float = 0.2,
+        dropout: float = 0.1,
+        freeze_backbone: bool = True,
+        task_names: Optional[List[str]] = None,
+        organ_names: Optional[List[str]] = None,
+        input_channels: int = 1,
+    ):
         super().__init__()
 
-        self.task_names = [
-            'liver_injury', 'liver_high_risk',
-            'spleen_injury', 'spleen_high_risk',
-            'kidney_injury', 'kidney_high_risk',
-            'bowel', 'extravasation'
-        ]
+        # 分类任务名称（可配置）
+        if task_names is None:
+            task_names = [
+                'liver_injury', 'liver_high_risk',
+                'spleen_injury', 'spleen_high_risk',
+                'kidney_injury', 'kidney_high_risk',
+                'bowel', 'extravasation'
+            ]
+        self.task_names = task_names
+
+        # 分割目标名称（可配置，独立于分类任务）
+        if organ_names is None:
+            organ_names = ['mask']
+        self.organ_names = organ_names
+
+        self.input_channels = input_channels
 
         # Backbone
         self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path)
@@ -219,23 +258,43 @@ class TraumaNetDINOv3(nn.Module):
                                            nn.GELU(),
                                            nn.Dropout(dropout))
 
-        # Seg-guided + Top-K + Fusion
-        self.seg_guided_aggregator = SegmentationGuidedAggregator(embed_dim=self.embed_dim, num_organs=len(self.task_names), top_k_ratio=top_k_ratio)
+        # Seg-guided aggregator 使用分割目标数量
+        num_seg_organs = len(self.organ_names)
+        self.seg_guided_aggregator = SegmentationGuidedAggregator(
+            embed_dim=self.embed_dim, num_organs=num_seg_organs, top_k_ratio=top_k_ratio
+        )
         self.topk_selector = TopKPatchSelector(embed_dim=self.embed_dim)
         self.feature_fusion = nn.Sequential(nn.Linear(self.embed_dim*3, self.embed_dim),
                                             nn.LayerNorm(self.embed_dim),
                                             nn.GELU(),
                                             nn.Dropout(dropout))
 
-        # Classification & Segmentation heads
+        # Classification head（使用分类任务名称）
         self.classification_head = AttentionClassificationHead(embed_dim=self.embed_dim, task_names=self.task_names)
-        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.task_names)
+        # Segmentation head（使用分割目标名称）
+        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.organ_names)
 
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
     def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: 输入图像 (B, C, H, W)
+               C=1 时自动repeat到3通道以适配DINOv3 ViT
+               C=3 时直接使用
+        Returns:
+            dict: {
+                'cls_logits': {task_name: (B,)},
+                'seg_logits': {organ_name: (B, 2, num_patches, num_patches)},
+                'aux_seg_logits': (B, N, num_organs)
+            }
+        """
+        # 灰度图自动扩展到3通道
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
         # 提取多层特征
         layer_outputs = self.backbone.get_intermediate_layers(x, n=self.use_n_blocks, return_class_token=True)
         cls_features, patch_tokens = self.feature_aggregator(layer_outputs)

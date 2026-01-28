@@ -167,23 +167,25 @@ class MultiTaskMetrics:
     用于跟踪和计算多器官分类和分割的评估指标
     """
 
-    def __init__(self, organ_names: List[str], num_classes_dict: Dict[str, int]):
+    def __init__(self, organ_names: List[str], num_classes_dict: Dict[str, int], seg_organ_names: List[str] = None):
         """
         初始化多任务评估指标
 
         Args:
-            organ_names: 器官名称列表
-            num_classes_dict: 各器官的类别数字典
+            organ_names: 分类任务名称列表
+            num_classes_dict: 各分类任务的类别数字典
+            seg_organ_names: 分割目标名称列表（可独立于分类任务配置）
         """
         self.organ_names = organ_names
         self.num_classes_dict = num_classes_dict
+        self.seg_organ_names = seg_organ_names if seg_organ_names is not None else ['mask']
 
         # 存储预测和目标
         self.cls_predictions = {organ: [] for organ in organ_names}
         self.cls_probabilities = {organ: [] for organ in organ_names}  # 存储预测概率用于AUROC/AUPRC
         self.cls_targets = {organ: [] for organ in organ_names}
-        # 分割任务只针对4个器官（不包括extravasation）
-        self.seg_dice_scores = {organ: [] for organ in ['liver', 'spleen', 'kidney', 'bowel']}
+        # 分割任务使用配置的器官名称
+        self.seg_dice_scores = {organ: [] for organ in self.seg_organ_names}
 
     def update(
         self,
@@ -291,8 +293,8 @@ class MultiTaskMetrics:
             self.cls_predictions[organ] = []
             self.cls_probabilities[organ] = []
             self.cls_targets[organ] = []
-            if organ in self.seg_dice_scores:
-                self.seg_dice_scores[organ] = []
+        for organ in self.seg_organ_names:
+            self.seg_dice_scores[organ] = []
 
 
 if __name__ == "__main__":
