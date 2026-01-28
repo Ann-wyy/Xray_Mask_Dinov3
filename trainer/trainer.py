@@ -196,7 +196,7 @@ class TraumaTrainer:
 
             self.optimizer.zero_grad()
             if self.use_amp:
-                with torch.cuda.amp.autocast('cuda'):
+                with torch.amp.autocast("cuda"):
                     outputs = self.model(images)
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, seg_targets)
                     loss = losses['total_loss']
