@@ -83,8 +83,8 @@ class TraumaTrainer:
         """创建训练、验证和测试数据加载器"""
         train_transform = RandomFlipRotate2D(flip_prob=0.5, max_angle=15)
         dataset_kwargs = {
-            'image_dir': self.config.data.image_dir,
-            'mask_dir': self.config.data.mask_dir,
+            'image_dir': getattr(self.config.data, 'image_dir', None),
+            'mask_dir': getattr(self.config.data, 'mask_dir', None),
             'target_shape': self.config.data.target_shape,
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
             'single_mask': getattr(self.config.data, 'single_mask', True),
