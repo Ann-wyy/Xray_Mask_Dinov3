@@ -93,6 +93,7 @@ class TraumaTrainer:
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
             'single_mask': getattr(self.config.data, 'single_mask', True),
             'mask_key': getattr(self.config.data, 'mask_key', 'mask'),
+            'label_columns': self.task_names,  # 明确告诉dataset哪些CSV列是标签
         }
 
         train_dataset = XrayBoneDataset(

@@ -73,8 +73,8 @@ class XrayBoneDataset(Dataset):
     X-ray骨平片数据集（保留分割mask + 多任务标签）
 
     Args:
-        image_dir: 图像目录
-        mask_dir: mask目录（.npz或.png文件）
+        image_dir: 图像目录（当CSV无img_path列时，从此目录按patient_id拼接路径）
+        mask_dir: mask目录（当CSV无mask_path列时，从此目录按patient_id拼接路径）
         label_file: CSV标签文件路径，或直接传入字典 {patient_id: {task_name: label}}
         target_shape: 输出影像和mask大小 (H, W)
         transform: 数据增强
@@ -82,7 +82,12 @@ class XrayBoneDataset(Dataset):
         use_preprocessed: 是否跳过归一化和resize
         single_mask: 是否使用单一骨骼mask（True）还是多器官mask字典（False）
         mask_key: 当使用.npz且single_mask=True时，指定要加载的mask key（默认'bone'）
+        label_columns: 指定CSV中哪些列是分类标签列。
+                       如果为None，自动排除 patient_id/img_path/mask_path 列，其余列视为标签。
     """
+    # CSV中不作为标签的元数据列
+    _META_COLUMNS = {'patient_id', 'img_path', 'mask_path', 'image_path', 'split', 'fold'}
+
     def __init__(
         self,
         image_dir: str,
@@ -93,7 +98,8 @@ class XrayBoneDataset(Dataset):
         mode: str = 'train',
         use_preprocessed: bool = False,
         single_mask: bool = True,
-        mask_key: str = 'bone'
+        mask_key: str = 'bone',
+        label_columns=None,
     ):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
@@ -103,6 +109,11 @@ class XrayBoneDataset(Dataset):
         self.use_preprocessed = use_preprocessed
         self.single_mask = single_mask
         self.mask_key = mask_key
+        self.label_columns = label_columns
+
+        # 用于存储CSV中每行的 img_path / mask_path（如果有）
+        self.img_paths = {}
+        self.mask_paths = {}
 
         # 加载标签：支持CSV文件或字典
         if isinstance(label_file, dict):
@@ -119,22 +130,51 @@ class XrayBoneDataset(Dataset):
         print(f"[{mode}] 加载了 {len(self.patient_ids)} 个样本")
 
     def _load_labels_from_csv(self) -> Dict[str, Dict[str, int]]:
-        """从CSV加载标签并转换为字典格式"""
+        """
+        从CSV加载标签并转换为字典格式。
+        自动识别标签列（排除元数据列如 patient_id, img_path, mask_path），
+        也可通过 self.label_columns 显式指定标签列名。
+        同时提取 img_path / mask_path 列（如果存在）。
+        """
+        all_columns = set(self.labels_df.columns)
+
+        # 确定哪些列是标签列
+        if self.label_columns is not None:
+            label_cols = [c for c in self.label_columns if c in all_columns]
+        else:
+            label_cols = [c for c in self.labels_df.columns if c not in self._META_COLUMNS]
+
+        has_img_path = 'img_path' in all_columns or 'image_path' in all_columns
+        has_mask_path = 'mask_path' in all_columns
+        img_path_col = 'img_path' if 'img_path' in all_columns else ('image_path' if 'image_path' in all_columns else None)
+
         label_dict = {}
         for _, row in self.labels_df.iterrows():
             patient_id = str(row['patient_id'])
+
+            # 提取路径（如果CSV包含路径列）
+            if img_path_col and pd.notna(row[img_path_col]):
+                self.img_paths[patient_id] = str(row[img_path_col])
+            if has_mask_path and pd.notna(row['mask_path']):
+                self.mask_paths[patient_id] = str(row['mask_path'])
+
+            # 仅解析标签列
             labels = {}
-            for col in self.labels_df.columns:
-                if col != 'patient_id':
-                    labels[col] = int(row[col])
+            for col in label_cols:
+                labels[col] = int(row[col])
             label_dict[patient_id] = labels
+
         return label_dict
 
     def __len__(self):
         return len(self.patient_ids)
 
     def _load_image(self, patient_id: str):
-        path = os.path.join(self.image_dir, f"{patient_id}.png")  # 或 .jpg
+        # 优先使用CSV中的完整路径，否则从image_dir拼接
+        if patient_id in self.img_paths:
+            path = self.img_paths[patient_id]
+        else:
+            path = os.path.join(self.image_dir, f"{patient_id}.png")
         image = np.array(Image.open(path).convert('L'), dtype=np.float32)
 
         if not self.use_preprocessed:
@@ -154,9 +194,18 @@ class XrayBoneDataset(Dataset):
         - single_mask=True: 返回单个np.ndarray (H,W)
         - single_mask=False: 返回字典 {organ: np.ndarray (H,W)}
         """
-        # 尝试加载.npz文件
-        npz_path = os.path.join(self.mask_dir, f"{patient_id}.npz")
-        png_path = os.path.join(self.mask_dir, f"{patient_id}.png")
+        # 优先使用CSV中的完整路径，否则从mask_dir拼接
+        if patient_id in self.mask_paths:
+            csv_mask_path = self.mask_paths[patient_id]
+            if csv_mask_path.endswith('.npz'):
+                npz_path = csv_mask_path
+                png_path = csv_mask_path.replace('.npz', '.png')
+            else:
+                png_path = csv_mask_path
+                npz_path = csv_mask_path.replace('.png', '.npz')
+        else:
+            npz_path = os.path.join(self.mask_dir, f"{patient_id}.npz")
+            png_path = os.path.join(self.mask_dir, f"{patient_id}.png")
 
         if os.path.exists(npz_path):
             # 从.npz加载
