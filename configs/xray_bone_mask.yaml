@@ -46,12 +46,11 @@ model:
   enable_segmentation: true
   seg_organs: ["mask"]                      # 分割目标名称列表（与mask_key一致）
 
-  # 分类任务配置（全部二分类）
+  # 分类任务配置（全部二分类，key必须与CSV列名一致）
   num_classes:
-    femur_fracture: 2
-    pelvis_fracture: 2
-    spine_fracture: 2
-    joint_dislocation: 2
+    Benign: 2
+    Intermediate: 2
+    Malignant: 2
 
   # 模型超参数
   use_n_blocks: 4                           # 使用backbone最后4层特征
