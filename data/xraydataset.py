@@ -225,15 +225,25 @@ class XrayBoneDataset(Dataset):
         if self.transform is not None and self.mode == 'train':
             image, masks = self.transform(image, masks)
 
+        # 确保image是2D (H,W)，因为RandomFlipRotate2D会添加channel维度
+        if isinstance(image, np.ndarray) and image.ndim == 3:
+            image = image.squeeze(0)
+
         # 转tensor
-        image = torch.from_numpy(image).unsqueeze(0).float()  # (1,H,W)
+        image = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0).float()  # (1,H,W)
 
         if self.single_mask:
-            # 单一mask: 转为字典格式 {'bone': tensor}
-            masks_tensor = {self.mask_key: torch.from_numpy(masks).unsqueeze(0).long()}
+            # 确保mask是2D (H,W)
+            if isinstance(masks, np.ndarray) and masks.ndim == 3:
+                masks = masks.squeeze(0)
+            masks_tensor = {self.mask_key: torch.from_numpy(np.ascontiguousarray(masks)).unsqueeze(0).long()}
         else:
-            # 多器官mask字典
-            masks_tensor = {k: torch.from_numpy(v).unsqueeze(0).long() for k, v in masks.items()}
+            # 多器官mask字典，确保每个mask是2D
+            masks_tensor = {}
+            for k, v in masks.items():
+                if isinstance(v, np.ndarray) and v.ndim == 3:
+                    v = v.squeeze(0)
+                masks_tensor[k] = torch.from_numpy(np.ascontiguousarray(v)).unsqueeze(0).long()
 
         labels_tensor = {k: torch.tensor(v).long() for k, v in labels.items()}
 

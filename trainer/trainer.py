@@ -217,6 +217,7 @@ class TraumaTrainer:
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validation"):
                 images = batch['image'].to(self.device)
+                images = images.repeat(1, 3, 1, 1)
                 cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
                 seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
@@ -238,6 +239,7 @@ class TraumaTrainer:
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Testing"):
                 images = batch['image'].to(self.device)
+                images = images.repeat(1, 3, 1, 1)
                 cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
                 seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
