@@ -73,7 +73,8 @@ class TraumaTrainer:
 
         # 混合精度
         self.use_amp = config.training.use_amp
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+
 
         self.logger.info("训练器初始化完成！")
         self.logger.info("=" * 60)
@@ -85,8 +86,9 @@ class TraumaTrainer:
             'image_dir': self.config.data.image_dir,
             'mask_dir': self.config.data.mask_dir,
             'target_shape': self.config.data.target_shape,
-            'organ_labels': self.config.data.organ_labels,
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
+            'single_mask': getattr(self.config.data, 'single_mask', True),
+            'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
         }
 
         train_dataset = XrayBoneDataset(
@@ -125,7 +127,7 @@ class TraumaTrainer:
         top_k_ratio = getattr(self.config.model, 'top_k_ratio', 0.2)
         dropout = getattr(self.config.model, 'dropout', 0.1)
         freeze_backbone = getattr(self.config.model, 'freeze_backbone', False)
-        use_n_blocks = getattr(self.config.model, 'use_n_blocks', None)
+        use_n_blocks = getattr(self.config.model, 'use_n_blocks', 4)
 
         self.logger.info(f"  模型类型: DINOv3, ViT架构: {cfg_path}")
         model = TraumaNetDINOv3(
@@ -136,7 +138,6 @@ class TraumaTrainer:
             top_k_ratio=top_k_ratio,
             dropout=dropout,
             freeze_backbone=freeze_backbone,
-            seg_organs=self.config.model.seg_organs,
         )
         return model
 
@@ -180,12 +181,13 @@ class TraumaTrainer:
 
         for batch in tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}"):
             images = batch['image'].to(self.device)
+            images = images.repeat(1, 3, 1, 1)
             cls_targets = {k: v.to(self.device) for k, v in batch['labels'].items()}
             seg_targets = {k: v.to(self.device) for k, v in batch['masks'].items()}
 
             self.optimizer.zero_grad()
             if self.use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.cuda.amp.autocast('cuda'):
                     outputs = self.model(images)
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, seg_targets)
                     loss = losses['total_loss']
@@ -248,3 +250,54 @@ class TraumaTrainer:
         metrics = self.test_metrics.compute()
         metrics['loss'] = np.mean(test_losses)
         return metrics
+    
+    def train(self):
+        self.logger.info("开始训练")
+        for epoch in range(self.current_epoch, self.config.training.epochs):
+            self.current_epoch = epoch
+            self.logger.info(f"Epoch [{epoch+1}/{self.config.training.epochs}]")
+
+            # ---- Train ----
+            train_metrics = self.train_epoch()
+            self.logger.info(f"Train metrics: {train_metrics}")
+
+            # ---- Validate ----
+            val_metrics = self.validate()
+            self.logger.info(f"Val metrics: {val_metrics}")
+
+            # ---- Scheduler ----
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_metrics.get('metric', val_metrics['loss']))
+                else:
+                    self.scheduler.step()
+
+            # ---- Save best ----
+            cur_metric = val_metrics.get('metric', -val_metrics['loss'])
+            if cur_metric > self.best_metric:
+                self.best_metric = cur_metric
+                self._save_checkpoint(best=True)
+
+            # ---- Save last ----
+            self._save_checkpoint(best=False)
+
+        self.logger.info("训练完成")
+
+    def _save_checkpoint(self, best=False):
+        state = {
+            'epoch': self.current_epoch,
+            'model': self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'best_metric': self.best_metric,
+        }
+
+        ckpt_dir = self.config.log.checkpoint_dir
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        if best:
+            path = os.path.join(ckpt_dir, 'best.pth')
+        else:
+            path = os.path.join(ckpt_dir, 'last.pth')
+
+        torch.save(state, path)
+
