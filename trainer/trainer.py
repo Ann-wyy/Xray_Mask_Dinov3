@@ -129,10 +129,20 @@ class TraumaTrainer:
         freeze_backbone = getattr(self.config.model, 'freeze_backbone', False)
         use_n_blocks = getattr(self.config.model, 'use_n_blocks', 4)
 
+        # 从config读取任务名和分割器官名
+        task_names = list(self.config.model.num_classes.keys()) if hasattr(self.config.model, 'num_classes') else None
+        seg_organ_names = list(self.config.model.seg_organs) if hasattr(self.config.model, 'seg_organs') else None
+
         self.logger.info(f"  模型类型: DINOv3, ViT架构: {cfg_path}")
+        if task_names:
+            self.logger.info(f"  分类任务: {task_names}")
+        if seg_organ_names:
+            self.logger.info(f"  分割器官: {seg_organ_names}")
         model = TraumaNetDINOv3(
             cfg_path=cfg_path,
             pretrained_path=pretrained_path,
+            task_names=task_names,
+            seg_organ_names=seg_organ_names,
             img_size=self.config.data.target_shape[0],
             use_n_blocks=use_n_blocks,
             top_k_ratio=top_k_ratio,

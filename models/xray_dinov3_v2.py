@@ -198,15 +198,16 @@ class PatchBasedSegmentationHead(nn.Module):
 # 主模型
 # -----------------------------
 class TraumaNetDINOv3(nn.Module):
-    def __init__(self, cfg_path: str, pretrained_path: str, img_size: int = 512, use_n_blocks: int = 4, top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
+    def __init__(self, cfg_path: str, pretrained_path: str, task_names: List[str] = None, seg_organ_names: List[str] = None, img_size: int = 512, use_n_blocks: int = 4, top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
         super().__init__()
 
-        self.task_names = [
+        self.task_names = task_names or [
             'liver_injury', 'liver_high_risk',
             'spleen_injury', 'spleen_high_risk',
             'kidney_injury', 'kidney_high_risk',
             'bowel', 'extravasation'
         ]
+        self.seg_organ_names = seg_organ_names or self.task_names
 
         # Backbone
         self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path)
@@ -229,7 +230,7 @@ class TraumaNetDINOv3(nn.Module):
 
         # Classification & Segmentation heads
         self.classification_head = AttentionClassificationHead(embed_dim=self.embed_dim, task_names=self.task_names)
-        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.task_names)
+        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.seg_organ_names)
 
         if freeze_backbone:
             for p in self.backbone.parameters():
