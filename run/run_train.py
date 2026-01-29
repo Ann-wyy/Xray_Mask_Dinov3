@@ -42,7 +42,8 @@ def main():
         save_config(config, os.path.join(args.output_dir, 'config.yaml'))
 
     # 创建训练器（trainer会完成所有初始化工作）
-    trainer = TraumaTrainer(config=config, device=config.device)
+    device = getattr(config, 'device', 'cuda')
+    trainer = TraumaTrainer(config=config, device=device)
 
     # 恢复训练（如果指定）
     if args.resume:
