@@ -11,13 +11,42 @@ from dinov3.models import build_model_from_cfg
 # -----------------------------
 # Backbone 构建函数
 # -----------------------------
-def build_dinov3_backbone(cfg_path: str, device: str = "cuda:0"):
+def build_dinov3_backbone(cfg_path: str, pretrained_path: str = None, device: str = "cuda:0"):
+    """
+    构建DINOv3 backbone并加载预训练权重
+
+    注意：DINOv3使用meta tensors，必须按以下顺序操作：
+    1. to_empty() - 将meta tensors移动到实际设备（创建未初始化的空张量）
+    2. load_state_dict() - 立即加载预训练权重填充这些空张量
+    """
     cfg = OmegaConf.load(cfg_path)
     backbone, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-    # 注意：不要使用to_empty()，它会创建未初始化的空张量导致NaN
-    # backbone.to_empty(device=device)  # 这行会导致NaN!
+
+    # Step 1: 将meta tensors移动到实际设备
+    backbone.to_empty(device=device)
+
+    # Step 2: 立即加载预训练权重（必须在to_empty之后！）
+    if pretrained_path and os.path.exists(pretrained_path):
+        print(f"[INFO] 加载DINOv3预训练权重: {pretrained_path}")
+        state_dict = torch.load(pretrained_path, map_location=device)
+        # 处理可能的包装格式
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        elif 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        elif 'teacher' in state_dict:
+            state_dict = state_dict['teacher']
+        # 加载权重
+        missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"[WARNING] 缺失的权重: {len(missing)} 个")
+        if unexpected:
+            print(f"[WARNING] 多余的权重: {len(unexpected)} 个")
+        print(f"[INFO] DINOv3权重加载完成!")
+    else:
+        raise ValueError(f"[ERROR] 预训练权重文件不存在: {pretrained_path}，DINOv3必须加载预训练权重!")
+
     backbone.eval()
-    backbone.to(device)
     return backbone, embed_dim
 
 # -----------------------------
@@ -205,29 +234,9 @@ class TraumaNetDINOv3(nn.Module):
         self.task_names = task_names 
         self.seg_organ_names = seg_organ_names or self.task_names
 
-        # Backbone
-        self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path)
+        # Backbone（权重在build_dinov3_backbone中加载）
+        self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path, pretrained_path=pretrained_path)
         self.use_n_blocks = use_n_blocks
-
-        # 加载预训练权重
-        if pretrained_path and os.path.exists(pretrained_path):
-            print(f"[INFO] 加载DINOv3预训练权重: {pretrained_path}")
-            state_dict = torch.load(pretrained_path, map_location='cpu')
-            # 处理可能的包装格式
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            elif 'state_dict' in state_dict:
-                state_dict = state_dict['state_dict']
-            elif 'teacher' in state_dict:
-                state_dict = state_dict['teacher']
-            # 加载权重（允许不完全匹配）
-            missing, unexpected = self.backbone.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f"[WARNING] 缺失的权重: {len(missing)} 个")
-            if unexpected:
-                print(f"[WARNING] 多余的权重: {len(unexpected)} 个")
-        else:
-            print(f"[WARNING] 未找到预训练权重文件: {pretrained_path}，使用随机初始化!")
 
         # Feature Aggregator
         self.feature_aggregator = MultiLayerFeatureAggregator(embed_dim=self.embed_dim, use_n_blocks=use_n_blocks)
