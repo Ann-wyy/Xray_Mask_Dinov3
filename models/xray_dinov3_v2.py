@@ -1,20 +1,10 @@
-"""
-
-改进点：
-1. 分割引导的特征聚合 - 用分割预测作为注意力权重
-2. Top-K Patch聚合 - 针对小病灶/散发病灶
-3. 层次化Slice Transformer (4层) - 局部+全局注意力
-4. Attention-based分类头 - 任务特定query + 交叉注意力
-"""
-
 import os
 import sys
-sys.path.insert(0, "/data/truenas_B2/yyi/dinov3_pretrain")
+sys.path.insert(0, '/data/truenas_B2/yyi/dinov3_pretrain')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional
-
+from typing import List
 from omegaconf import OmegaConf
 from dinov3.models import build_model_from_cfg
 
@@ -23,14 +13,14 @@ from dinov3.models import build_model_from_cfg
 # -----------------------------
 def build_dinov3_backbone(cfg_path: str, device: str = "cuda:0"):
     cfg = OmegaConf.load(cfg_path)
-    backbone = build_model_from_cfg(cfg, only_teacher=True)
+    backbone, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
+    backbone.to_empty(device=device)
     backbone.eval()
     backbone.to(device)
-    embed_dim = getattr(backbone, "embed_dim", 1024)
     return backbone, embed_dim
 
 # -----------------------------
-# 多层特征聚合
+# MultiLayer Feature Aggregator
 # -----------------------------
 class MultiLayerFeatureAggregator(nn.Module):
     def __init__(self, embed_dim: int = 768, use_n_blocks: int = 4, use_patch_avg: bool = True):
@@ -64,27 +54,29 @@ class MultiLayerFeatureAggregator(nn.Module):
 # Segmentation-guided Aggregator
 # -----------------------------
 class SegmentationGuidedAggregator(nn.Module):
-    def __init__(self, embed_dim: int = 768, num_organs: int = 4, top_k_ratio: float = 0.2):
+    def __init__(self, embed_dim: int = 768, seg_organ_names: List[str] = None, top_k_ratio: float = 0.2, img_size: int = 512):
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_organs = num_organs
+        self.seg_organ_names = seg_organ_names or ["mask"]
         self.top_k_ratio = top_k_ratio
+        self.num_organs = len(self.seg_organ_names)
+        self.img_size = img_size
 
         self.seg_predictor = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
             nn.GELU(),
-            nn.Linear(embed_dim // 2, num_organs),
+            nn.Linear(embed_dim // 2, self.num_organs),
         )
 
         self.organ_transforms = nn.ModuleList([
             nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.LayerNorm(embed_dim), nn.GELU())
-            for _ in range(num_organs)
+            for _ in range(self.num_organs)
         ])
         self.global_transform = nn.Sequential(
             nn.Linear(embed_dim, embed_dim), nn.LayerNorm(embed_dim), nn.GELU()
         )
         self.fusion = nn.Sequential(
-            nn.Linear(embed_dim * (num_organs + 1), embed_dim), nn.LayerNorm(embed_dim), nn.GELU()
+            nn.Linear(embed_dim * (self.num_organs + 1), embed_dim), nn.LayerNorm(embed_dim), nn.GELU()
         )
 
     def forward(self, patch_tokens: torch.Tensor, return_seg_logits: bool = True):
@@ -110,8 +102,11 @@ class SegmentationGuidedAggregator(nn.Module):
         aggregated_features = self.fusion(concat_features)
 
         if return_seg_logits:
-            return aggregated_features, seg_logits
-        return aggregated_features, None
+            # 将 patch logits -> 原图大小
+            H = W = int(N ** 0.5)  # patch 数 -> H,W
+            seg_logits_upsampled = F.interpolate(seg_logits.permute(0,2,1).reshape(B, self.num_organs, H, W),
+                                                size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
+            return aggregated_features, seg_logits_upsampled
 
 # -----------------------------
 # Top-K Patch Selector
@@ -137,8 +132,8 @@ class TopKPatchSelector(nn.Module):
     def forward(self, patch_tokens: torch.Tensor):
         B, N, D = patch_tokens.shape
         importance_scores = self.importance_scorer(patch_tokens).squeeze(-1)
-
         scale_features = []
+
         for ratio in self.scale_ratios:
             top_k = max(1, int(N * ratio))
             topk_values, topk_indices = torch.topk(importance_scores, top_k, dim=1)
@@ -169,6 +164,7 @@ class AttentionClassificationHead(nn.Module):
     def forward(self, features: torch.Tensor):
         B = features.shape[0]
         queries = self.task_queries.unsqueeze(0).expand(B, -1, -1)
+        # cross-attention: queries=task_queries, key/value=features
         task_features, _ = self.cross_attn(queries, features.unsqueeze(1), features.unsqueeze(1))
         task_features = self.norm(task_features + queries)
         return {name: self.classifiers[name](task_features[:, i]).squeeze(-1) for i, name in enumerate(self.task_names)}
@@ -190,23 +186,23 @@ class PatchBasedSegmentationHead(nn.Module):
         })
 
     def forward(self, patch_tokens: torch.Tensor):
-        B = patch_tokens.shape[0]
-        x = patch_tokens.transpose(1, 2).reshape(B, -1, self.num_patches, self.num_patches)
-        return {organ: self.seg_heads[organ](x) for organ in self.organ_names}
+        B, N, D = patch_tokens.shape
+        H_patch = W_patch = int(N**0.5)
+        x = patch_tokens.transpose(1, 2).reshape(B, D, H_patch, W_patch)  # patch-level reshape
+        return {organ: self.seg_heads[organ](x) for organ in self.organ_names}  # 不再 F.interpolate
+
+
 
 # -----------------------------
 # 主模型
 # -----------------------------
 class TraumaNetDINOv3(nn.Module):
-    def __init__(self, cfg_path: str, pretrained_path: str, img_size: int = 512, use_n_blocks: int = 4, top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
+    def __init__(self, cfg_path: str, pretrained_path: str = None, task_names: List[str] = None,
+                 seg_organ_names: List[str] = None, img_size: int = 512, use_n_blocks: int = 4,
+                 top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
         super().__init__()
-
-        self.task_names = [
-            'liver_injury', 'liver_high_risk',
-            'spleen_injury', 'spleen_high_risk',
-            'kidney_injury', 'kidney_high_risk',
-            'bowel', 'extravasation'
-        ]
+        self.task_names = task_names 
+        self.seg_organ_names = seg_organ_names or self.task_names
 
         # Backbone
         self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path)
@@ -220,7 +216,7 @@ class TraumaNetDINOv3(nn.Module):
                                            nn.Dropout(dropout))
 
         # Seg-guided + Top-K + Fusion
-        self.seg_guided_aggregator = SegmentationGuidedAggregator(embed_dim=self.embed_dim, num_organs=len(self.task_names), top_k_ratio=top_k_ratio)
+        self.seg_guided_aggregator = SegmentationGuidedAggregator(embed_dim=self.embed_dim, seg_organ_names=self.seg_organ_names, top_k_ratio=top_k_ratio,img_size=img_size)
         self.topk_selector = TopKPatchSelector(embed_dim=self.embed_dim)
         self.feature_fusion = nn.Sequential(nn.Linear(self.embed_dim*3, self.embed_dim),
                                             nn.LayerNorm(self.embed_dim),
@@ -229,14 +225,14 @@ class TraumaNetDINOv3(nn.Module):
 
         # Classification & Segmentation heads
         self.classification_head = AttentionClassificationHead(embed_dim=self.embed_dim, task_names=self.task_names)
-        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.task_names)
+        self.seg_head = PatchBasedSegmentationHead(embed_dim=self.embed_dim, img_size=img_size, organ_names=self.seg_organ_names)
 
+        # Freeze backbone
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
     def forward(self, x: torch.Tensor):
-        # 提取多层特征
         layer_outputs = self.backbone.get_intermediate_layers(x, n=self.use_n_blocks, return_class_token=True)
         cls_features, patch_tokens = self.feature_aggregator(layer_outputs)
         cls_features = self.dim_reduction(cls_features)
@@ -248,4 +244,4 @@ class TraumaNetDINOv3(nn.Module):
         cls_logits = self.classification_head(fused_features)
         seg_logits = self.seg_head(patch_tokens)
 
-        return {"cls_logits": cls_logits, "seg_logits": seg_logits, "aux_seg_logits": aux_seg_logits}
+        return {"cls_logits": cls_logits, "seg_logits": seg_logits}
