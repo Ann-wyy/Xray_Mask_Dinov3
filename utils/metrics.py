@@ -122,6 +122,9 @@ class MultiTaskMetrics:
                 logit = seg_logits[organ]
                 target_patch = seg_targets[organ]  # patch-level target
                 dice = compute_dice_score(logit, target_patch)
+                # 动态添加未知的organ键
+                if organ not in self.seg_dice_scores:
+                    self.seg_dice_scores[organ] = []
                 self.seg_dice_scores[organ].append(dice.item())
 
     def compute(self) -> Dict[str,float]:
@@ -173,5 +176,6 @@ class MultiTaskMetrics:
             self.cls_predictions[organ] = []
             self.cls_probabilities[organ] = []
             self.cls_targets[organ] = []
-        for organ in self.seg_organ_names:
+        # 重置所有已存在的seg_dice_scores键
+        for organ in list(self.seg_dice_scores.keys()):
             self.seg_dice_scores[organ] = []

@@ -58,9 +58,10 @@ class TraumaTrainer:
 
         # metrics
         organ_names = list(config.model.num_classes.keys())
-        self.train_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.val_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.test_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
+        seg_organ_names = list(config.model.seg_organs) if hasattr(config.model, 'seg_organs') else None
+        self.train_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
+        self.val_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
+        self.test_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
 
         # tensorboard
         self.writer = SummaryWriter(config.log.tensorboard_dir)
