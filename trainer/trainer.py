@@ -187,10 +187,18 @@ class TraumaTrainer:
         metrics.reset()
         epoch_losses = []
 
-        for batch in tqdm(loader, desc=mode.capitalize(), leave=False):
+        for batch_idx, batch in enumerate(tqdm(loader, desc=mode.capitalize(), leave=False)):
             images = batch['image'].to(self.device)
             if images.shape[1] == 1:
                 images = images.repeat(1,3,1,1)
+
+            # 调试：检查输入数据
+            if batch_idx == 0:
+                if torch.isnan(images).any():
+                    self.logger.warning(f"[DEBUG] 输入图像包含NaN!")
+                if torch.isinf(images).any():
+                    self.logger.warning(f"[DEBUG] 输入图像包含Inf!")
+                self.logger.info(f"[DEBUG] 图像形状: {images.shape}, 范围: [{images.min():.4f}, {images.max():.4f}]")
 
             cls_targets = {k:v.to(self.device) for k,v in batch['labels'].items()}
             seg_targets = {k:v.to(self.device) for k,v in batch['masks'].items()}
@@ -208,6 +216,16 @@ class TraumaTrainer:
             if mode == 'train' and self.use_amp:
                 with torch.amp.autocast('cuda'):
                     outputs = self.model(images)
+
+                    # 调试：检查模型输出
+                    if batch_idx == 0:
+                        for name, logit in outputs['cls_logits'].items():
+                            if torch.isnan(logit).any():
+                                self.logger.warning(f"[DEBUG] cls_logits[{name}] 包含NaN, shape={logit.shape}")
+                        for name, logit in outputs['seg_logits'].items():
+                            if torch.isnan(logit).any():
+                                self.logger.warning(f"[DEBUG] seg_logits[{name}] 包含NaN, shape={logit.shape}")
+
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
                     loss = losses['total_loss']
                 self.scaler.scale(loss).backward()

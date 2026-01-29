@@ -154,9 +154,12 @@ class MultiTaskLoss(nn.Module):
         else:
             losses['seg_loss'] = torch.tensor(0.0, device=device)
 
-        # 确保total_loss是tensor
+        # 确保total_loss是tensor且有梯度
         if not isinstance(total_loss, torch.Tensor):
-            total_loss = torch.tensor(total_loss, device=device)
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        elif not total_loss.requires_grad:
+            # 如果total_loss没有梯度（所有损失都是NaN被跳过），创建一个需要梯度的零张量
+            total_loss = total_loss + torch.zeros(1, device=device, requires_grad=True).squeeze()
 
         losses['total_loss'] = total_loss
         return losses
