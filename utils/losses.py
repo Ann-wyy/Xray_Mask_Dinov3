@@ -89,9 +89,35 @@ class MultiTaskLoss(nn.Module):
 
         # ---- classification ----
         cls_loss = 0.0
+        valid_cls = 0
         for name, logit in cls_logits.items():
-            cls_loss += self.cls_criterion(logit, cls_targets[name].float())
-        cls_loss = cls_loss / max(1, len(cls_logits))
+            target = cls_targets[name].float()
+
+            # 调试：检查形状和值
+            if logit.shape != target.shape:
+                logit = logit.view_as(target)
+
+            # 检查target是否在有效范围内（BCE需要0-1）
+            if target.min() < 0 or target.max() > 1:
+                print(f"[WARNING] {name} target超出[0,1]范围: min={target.min()}, max={target.max()}")
+                target = target.clamp(0, 1)
+
+            # 检查是否有NaN
+            if torch.isnan(logit).any():
+                print(f"[WARNING] {name} logit包含NaN")
+                continue
+
+            loss = self.cls_criterion(logit, target)
+            if not torch.isnan(loss):
+                cls_loss += loss
+                valid_cls += 1
+            else:
+                print(f"[WARNING] {name} 分类损失为NaN")
+
+        if valid_cls > 0:
+            cls_loss = cls_loss / valid_cls
+        else:
+            cls_loss = torch.tensor(0.0, device=device)
         losses['cls_loss'] = cls_loss
         total_loss += cls_loss
 
@@ -99,14 +125,27 @@ class MultiTaskLoss(nn.Module):
         seg_loss = 0.0
         valid_seg = 0
         for organ, logit in seg_logits.items():
+            if organ not in seg_targets:
+                print(f"[WARNING] seg_targets中没有键'{organ}'，可用键: {list(seg_targets.keys())}")
+                continue
+
             target = seg_targets[organ]
 
             # 全负样本跳过
             if target.sum() == 0:
                 continue
 
-            seg_loss += self.dice_loss(logit, target)
-            valid_seg += 1
+            # 检查是否有NaN
+            if torch.isnan(logit).any():
+                print(f"[WARNING] {organ} seg_logit包含NaN")
+                continue
+
+            loss = self.dice_loss(logit, target)
+            if not torch.isnan(loss):
+                seg_loss += loss
+                valid_seg += 1
+            else:
+                print(f"[WARNING] {organ} Dice损失为NaN")
 
         if valid_seg > 0:
             seg_loss = seg_loss / valid_seg
