@@ -29,6 +29,7 @@ def build_dinov3_backbone(cfg_path: str, pretrained_path: str = None, device: st
     if pretrained_path and os.path.exists(pretrained_path):
         print(f"[INFO] 加载DINOv3预训练权重: {pretrained_path}")
         state_dict = torch.load(pretrained_path, map_location=device)
+
         # 处理可能的包装格式
         if 'model' in state_dict:
             state_dict = state_dict['model']
@@ -36,12 +37,42 @@ def build_dinov3_backbone(cfg_path: str, pretrained_path: str = None, device: st
             state_dict = state_dict['state_dict']
         elif 'teacher' in state_dict:
             state_dict = state_dict['teacher']
+
+        # 调试：打印权重key的前缀
+        model_keys = list(backbone.state_dict().keys())
+        ckpt_keys = list(state_dict.keys())
+        print(f"[DEBUG] 模型权重keys示例: {model_keys[:3]}")
+        print(f"[DEBUG] 检查点权重keys示例: {ckpt_keys[:3]}")
+
+        # 尝试移除常见的前缀
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # 移除可能的前缀
+            new_key = k
+            for prefix in ['backbone.', 'module.', 'encoder.', 'teacher.', 'model.']:
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+            new_state_dict[new_key] = v
+
         # 加载权重
-        missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
+        missing, unexpected = backbone.load_state_dict(new_state_dict, strict=False)
         if missing:
             print(f"[WARNING] 缺失的权重: {len(missing)} 个")
+            if len(missing) <= 10:
+                print(f"[DEBUG] 缺失keys: {missing}")
+            else:
+                print(f"[DEBUG] 缺失keys示例: {missing[:5]}")
         if unexpected:
             print(f"[WARNING] 多余的权重: {len(unexpected)} 个")
+            if len(unexpected) <= 10:
+                print(f"[DEBUG] 多余keys: {unexpected}")
+            else:
+                print(f"[DEBUG] 多余keys示例: {unexpected[:5]}")
+
+        # 如果缺失太多，说明匹配失败
+        if len(missing) > 100:
+            print(f"[ERROR] 权重匹配失败！缺失{len(missing)}个权重，请检查预训练文件是否正确。")
+
         print(f"[INFO] DINOv3权重加载完成!")
     else:
         raise ValueError(f"[ERROR] 预训练权重文件不存在: {pretrained_path}，DINOv3必须加载预训练权重!")
