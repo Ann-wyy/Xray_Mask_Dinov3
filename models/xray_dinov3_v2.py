@@ -14,7 +14,8 @@ from dinov3.models import build_model_from_cfg
 def build_dinov3_backbone(cfg_path: str, device: str = "cuda:0"):
     cfg = OmegaConf.load(cfg_path)
     backbone, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-    backbone.to_empty(device=device)
+    # 注意：不要使用to_empty()，它会创建未初始化的空张量导致NaN
+    # backbone.to_empty(device=device)  # 这行会导致NaN!
     backbone.eval()
     backbone.to(device)
     return backbone, embed_dim
@@ -207,6 +208,26 @@ class TraumaNetDINOv3(nn.Module):
         # Backbone
         self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path)
         self.use_n_blocks = use_n_blocks
+
+        # 加载预训练权重
+        if pretrained_path and os.path.exists(pretrained_path):
+            print(f"[INFO] 加载DINOv3预训练权重: {pretrained_path}")
+            state_dict = torch.load(pretrained_path, map_location='cpu')
+            # 处理可能的包装格式
+            if 'model' in state_dict:
+                state_dict = state_dict['model']
+            elif 'state_dict' in state_dict:
+                state_dict = state_dict['state_dict']
+            elif 'teacher' in state_dict:
+                state_dict = state_dict['teacher']
+            # 加载权重（允许不完全匹配）
+            missing, unexpected = self.backbone.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"[WARNING] 缺失的权重: {len(missing)} 个")
+            if unexpected:
+                print(f"[WARNING] 多余的权重: {len(unexpected)} 个")
+        else:
+            print(f"[WARNING] 未找到预训练权重文件: {pretrained_path}，使用随机初始化!")
 
         # Feature Aggregator
         self.feature_aggregator = MultiLayerFeatureAggregator(embed_dim=self.embed_dim, use_n_blocks=use_n_blocks)

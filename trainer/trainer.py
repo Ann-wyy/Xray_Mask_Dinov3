@@ -233,6 +233,16 @@ class TraumaTrainer:
                 self.scaler.update()
             else:
                 outputs = self.model(images)
+
+                # 调试：检查模型输出（非AMP分支）
+                if batch_idx == 0:
+                    for name, logit in outputs['cls_logits'].items():
+                        if torch.isnan(logit).any():
+                            self.logger.warning(f"[DEBUG] cls_logits[{name}] 包含NaN, shape={logit.shape}")
+                    for name, logit in outputs['seg_logits'].items():
+                        if torch.isnan(logit).any():
+                            self.logger.warning(f"[DEBUG] seg_logits[{name}] 包含NaN, shape={logit.shape}")
+
                 if mode == 'train':
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
                     loss = losses['total_loss']
