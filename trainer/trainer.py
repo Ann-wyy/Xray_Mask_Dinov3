@@ -171,15 +171,22 @@ class TraumaTrainer:
         return patch_targets
 
     # ------------------- Train / Val / Test Epoch -------------------
-    def _run_epoch(self, loader, train=True):
-        if train: self.model.train()
-        else: self.model.eval()
+    def _run_epoch(self, loader, mode='train'):
+        if mode == 'train':
+            self.model.train()
+        else:
+            self.model.eval()
 
-        metrics = self.train_metrics if train else self.val_metrics if not train else self.test_metrics
+        if mode == 'train':
+            metrics = self.train_metrics
+        elif mode == 'val':
+            metrics = self.val_metrics
+        else:
+            metrics = self.test_metrics
         metrics.reset()
         epoch_losses = []
 
-        for batch in tqdm(loader, desc="Train" if train else "Val/Test", leave=False):
+        for batch in tqdm(loader, desc=mode.capitalize(), leave=False):
             images = batch['image'].to(self.device)
             if images.shape[1] == 1:
                 images = images.repeat(1,3,1,1)
@@ -197,7 +204,7 @@ class TraumaTrainer:
                 patch_targets[k] = (patch_map > 0.5).long().squeeze(1)  # [B,H_patch,W_patch]
 
             self.optimizer.zero_grad()
-            if train and self.use_amp:
+            if mode == 'train' and self.use_amp:
                 with torch.amp.autocast('cuda'):
                     outputs = self.model(images)
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
@@ -207,7 +214,7 @@ class TraumaTrainer:
                 self.scaler.update()
             else:
                 outputs = self.model(images)
-                if train:
+                if mode == 'train':
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
                     loss = losses['total_loss']
                     loss.backward()
@@ -218,7 +225,7 @@ class TraumaTrainer:
             epoch_losses.append(losses['total_loss'].item())
             metrics.update(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
 
-            if train:
+            if mode == 'train':
                 self.global_step += 1
 
         result = metrics.compute()
@@ -226,9 +233,9 @@ class TraumaTrainer:
         return result
 
 
-    def train_epoch(self): return self._run_epoch(self.train_loader, train=True)
-    def validate(self): return self._run_epoch(self.val_loader, train=False)
-    def test(self): return self._run_epoch(self.test_loader, train=False)
+    def train_epoch(self): return self._run_epoch(self.train_loader, mode='train')
+    def validate(self): return self._run_epoch(self.val_loader, mode='val')
+    def test(self): return self._run_epoch(self.test_loader, mode='test')
 
     # ------------------- Trainer Loop -------------------
     def train(self):

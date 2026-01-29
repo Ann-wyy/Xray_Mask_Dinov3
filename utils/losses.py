@@ -80,6 +80,13 @@ class MultiTaskLoss(nn.Module):
         losses = {}
         total_loss = 0.0
 
+        # 获取device（从任意一个logit获取）
+        device = None
+        if cls_logits:
+            device = next(iter(cls_logits.values())).device
+        elif seg_logits:
+            device = next(iter(seg_logits.values())).device
+
         # ---- classification ----
         cls_loss = 0.0
         for name, logit in cls_logits.items():
@@ -106,7 +113,11 @@ class MultiTaskLoss(nn.Module):
             losses['seg_loss'] = seg_loss * self.seg_loss_weight
             total_loss += seg_loss * self.seg_loss_weight
         else:
-            losses['seg_loss'] = torch.tensor(0.0, device=total_loss.device)
+            losses['seg_loss'] = torch.tensor(0.0, device=device)
+
+        # 确保total_loss是tensor
+        if not isinstance(total_loss, torch.Tensor):
+            total_loss = torch.tensor(total_loss, device=device)
 
         losses['total_loss'] = total_loss
         return losses
