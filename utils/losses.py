@@ -108,6 +108,11 @@ class MultiTaskLoss(nn.Module):
                 continue
 
             loss = self.cls_criterion(logit, target)
+
+            # 应用类别权重
+            if name in self.pos_weights:
+                loss = loss * self.pos_weights[name]
+
             if not torch.isnan(loss):
                 cls_loss += loss
                 valid_cls += 1

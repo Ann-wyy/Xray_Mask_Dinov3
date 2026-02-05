@@ -143,12 +143,21 @@ class TraumaTrainer:
         raise ValueError(f"不支持的优化器: {opt_type}")
 
     def _create_criterion(self):
+        # 支持 class_weights 或 pos_weights
+        class_weights = getattr(self.config.training, 'class_weights', None)
+        if class_weights is None:
+            class_weights = getattr(self.config.training, 'pos_weights', None)
+        # 转换为dict（OmegaConf可能返回DictConfig）
+        if class_weights is not None:
+            class_weights = dict(class_weights)
+            self.logger.info(f"使用类别权重: {class_weights}")
+
         return MultiTaskLoss(
             seg_loss_weight=self.config.training.seg_loss_weight,
             loss_type=getattr(self.config.training, 'loss_type', 'CE'),
             focal_loss_alpha=getattr(self.config.training, 'focal_loss_alpha', 0.25),
             focal_loss_gamma=getattr(self.config.training, 'focal_loss_gamma', 2.0),
-            pos_weights=getattr(self.config.training, 'pos_weights', None),
+            pos_weights=class_weights,
             label_smoothing=getattr(self.config.training, 'label_smoothing', 0.0)
         )
 
