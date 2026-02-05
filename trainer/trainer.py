@@ -82,12 +82,9 @@ class TraumaTrainer:
     def _create_dataloaders(self):
         train_transform = RandomFlipRotate2D(flip_prob=0.5, max_angle=15)
         dataset_kwargs = {
+            'config':self.config,
             'image_dir': getattr(self.config.data, 'image_dir', None),
             'mask_dir': getattr(self.config.data, 'mask_dir', None),
-            'target_shape': self.config.data.target_shape,
-            'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
-            'single_mask': getattr(self.config.data, 'single_mask', True),
-            'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
         }
         train_dataset = XrayBoneDataset(label_file=self.config.data.train_dataset,
                                         mode='train', transform=train_transform, **dataset_kwargs)
@@ -200,14 +197,6 @@ class TraumaTrainer:
             images = batch['image'].to(self.device)
             if images.shape[1] == 1:
                 images = images.repeat(1,3,1,1)
-
-            # 调试：检查输入数据
-            if batch_idx == 0:
-                if torch.isnan(images).any():
-                    self.logger.warning(f"[DEBUG] 输入图像包含NaN!")
-                if torch.isinf(images).any():
-                    self.logger.warning(f"[DEBUG] 输入图像包含Inf!")
-                self.logger.info(f"[DEBUG] 图像形状: {images.shape}, 范围: [{images.min():.4f}, {images.max():.4f}]")
 
             cls_targets = {k:v.to(self.device) for k,v in batch['labels'].items()}
             seg_targets = {k:v.to(self.device) for k,v in batch['masks'].items()}
