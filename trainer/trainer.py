@@ -58,9 +58,10 @@ class TraumaTrainer:
 
         # metrics
         organ_names = list(config.model.num_classes.keys())
-        self.train_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.val_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
-        self.test_metrics = MultiTaskMetrics(organ_names, config.model.num_classes)
+        seg_organ_names = list(config.model.seg_organs) if hasattr(config.model, 'seg_organs') else None
+        self.train_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
+        self.val_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
+        self.test_metrics = MultiTaskMetrics(organ_names, config.model.num_classes, seg_organ_names=seg_organ_names)
 
         # tensorboard
         self.writer = SummaryWriter(config.log.tensorboard_dir)
@@ -80,13 +81,22 @@ class TraumaTrainer:
     # ------------------- Dataloader / Model / Optimizer -------------------
     def _create_dataloaders(self):
         train_transform = RandomFlipRotate2D(flip_prob=0.5, max_angle=15)
+
+        # 获取临床特征配置
+        clinical_features = getattr(self.config.data, 'clinical_features', None)
+        if clinical_features:
+            clinical_features = list(clinical_features)
+            self.logger.info(f"使用临床特征: {clinical_features}")
+
         dataset_kwargs = {
+            'config': self.config,
             'image_dir': getattr(self.config.data, 'image_dir', None),
             'mask_dir': getattr(self.config.data, 'mask_dir', None),
             'target_shape': self.config.data.target_shape,
             'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
             'single_mask': getattr(self.config.data, 'single_mask', True),
             'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
+            'clinical_features': clinical_features,
         }
         train_dataset = XrayBoneDataset(label_file=self.config.data.train_dataset,
                                         mode='train', transform=train_transform, **dataset_kwargs)
@@ -112,12 +122,19 @@ class TraumaTrainer:
         freeze_backbone = getattr(self.config.model, 'freeze_backbone', False)
         use_n_blocks = getattr(self.config.model, 'use_n_blocks', 4)
 
+        # 临床特征配置
+        clinical_features = getattr(self.config.data, 'clinical_features', None)
+        num_clinical_features = len(clinical_features) if clinical_features else 0
+        use_clinical = getattr(self.config.model, 'use_clinical', True)
+
         task_names = list(self.config.model.num_classes.keys()) if hasattr(self.config.model, 'num_classes') else None
         seg_organ_names = list(self.config.model.seg_organs) if hasattr(self.config.model, 'seg_organs') else None
 
         self.logger.info(f"模型类型: DINOv3, ViT架构: {cfg_path}")
         if task_names: self.logger.info(f"分类任务: {task_names}")
         if seg_organ_names: self.logger.info(f"分割器官: {seg_organ_names}")
+        if num_clinical_features > 0:
+            self.logger.info(f"临床特征数量: {num_clinical_features}, 使用临床特征: {use_clinical}")
 
         model = TraumaNetDINOv3(
             cfg_path=cfg_path,
@@ -128,7 +145,9 @@ class TraumaTrainer:
             use_n_blocks=use_n_blocks,
             top_k_ratio=top_k_ratio,
             dropout=dropout,
-            freeze_backbone=freeze_backbone
+            freeze_backbone=freeze_backbone,
+            num_clinical_features=num_clinical_features,
+            use_clinical=use_clinical
         )
         return model
 
@@ -142,12 +161,21 @@ class TraumaTrainer:
         raise ValueError(f"不支持的优化器: {opt_type}")
 
     def _create_criterion(self):
+        # 支持 class_weights 或 pos_weights
+        class_weights = getattr(self.config.training, 'class_weights', None)
+        if class_weights is None:
+            class_weights = getattr(self.config.training, 'pos_weights', None)
+        # 转换为dict（OmegaConf可能返回DictConfig）
+        if class_weights is not None:
+            class_weights = dict(class_weights)
+            self.logger.info(f"使用类别权重: {class_weights}")
+
         return MultiTaskLoss(
             seg_loss_weight=self.config.training.seg_loss_weight,
             loss_type=getattr(self.config.training, 'loss_type', 'CE'),
             focal_loss_alpha=getattr(self.config.training, 'focal_loss_alpha', 0.25),
             focal_loss_gamma=getattr(self.config.training, 'focal_loss_gamma', 2.0),
-            pos_weights=getattr(self.config.training, 'pos_weights', None),
+            pos_weights=class_weights,
             label_smoothing=getattr(self.config.training, 'label_smoothing', 0.0)
         )
 
@@ -171,21 +199,35 @@ class TraumaTrainer:
         return patch_targets
 
     # ------------------- Train / Val / Test Epoch -------------------
-    def _run_epoch(self, loader, train=True):
-        if train: self.model.train()
-        else: self.model.eval()
+    def _run_epoch(self, loader, mode='train'):
+        if mode == 'train':
+            self.model.train()
+        else:
+            self.model.eval()
 
-        metrics = self.train_metrics if train else self.val_metrics if not train else self.test_metrics
+        if mode == 'train':
+            metrics = self.train_metrics
+        elif mode == 'val':
+            metrics = self.val_metrics
+        else:
+            metrics = self.test_metrics
         metrics.reset()
         epoch_losses = []
 
-        for batch in tqdm(loader, desc="Train" if train else "Val/Test", leave=False):
+        for batch_idx, batch in enumerate(tqdm(loader, desc=mode.capitalize(), leave=False)):
             images = batch['image'].to(self.device)
             if images.shape[1] == 1:
                 images = images.repeat(1,3,1,1)
 
             cls_targets = {k:v.to(self.device) for k,v in batch['labels'].items()}
             seg_targets = {k:v.to(self.device) for k,v in batch['masks'].items()}
+
+            # 获取临床特征（如果有）
+            clinical = batch.get('clinical', None)
+            if clinical is not None and clinical.numel() > 0:
+                clinical = clinical.to(self.device)
+            else:
+                clinical = None
 
             # 生成 patch-level target
             patch_targets = {}
@@ -197,17 +239,37 @@ class TraumaTrainer:
                 patch_targets[k] = (patch_map > 0.5).long().squeeze(1)  # [B,H_patch,W_patch]
 
             self.optimizer.zero_grad()
-            if train and self.use_amp:
+            if mode == 'train' and self.use_amp:
                 with torch.amp.autocast('cuda'):
-                    outputs = self.model(images)
+                    outputs = self.model(images, clinical=clinical)
+
+                    # 调试：检查模型输出
+                    if batch_idx == 0:
+                        for name, logit in outputs['cls_logits'].items():
+                            if torch.isnan(logit).any():
+                                self.logger.warning(f"[DEBUG] cls_logits[{name}] 包含NaN, shape={logit.shape}")
+                        for name, logit in outputs['seg_logits'].items():
+                            if torch.isnan(logit).any():
+                                self.logger.warning(f"[DEBUG] seg_logits[{name}] 包含NaN, shape={logit.shape}")
+
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
                     loss = losses['total_loss']
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                outputs = self.model(images)
-                if train:
+                outputs = self.model(images, clinical=clinical)
+
+                # 调试：检查模型输出（非AMP分支）
+                if batch_idx == 0:
+                    for name, logit in outputs['cls_logits'].items():
+                        if torch.isnan(logit).any():
+                            self.logger.warning(f"[DEBUG] cls_logits[{name}] 包含NaN, shape={logit.shape}")
+                    for name, logit in outputs['seg_logits'].items():
+                        if torch.isnan(logit).any():
+                            self.logger.warning(f"[DEBUG] seg_logits[{name}] 包含NaN, shape={logit.shape}")
+
+                if mode == 'train':
                     losses = self.criterion(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
                     loss = losses['total_loss']
                     loss.backward()
@@ -218,7 +280,7 @@ class TraumaTrainer:
             epoch_losses.append(losses['total_loss'].item())
             metrics.update(outputs['cls_logits'], outputs['seg_logits'], cls_targets, patch_targets)
 
-            if train:
+            if mode == 'train':
                 self.global_step += 1
 
         result = metrics.compute()
@@ -226,9 +288,9 @@ class TraumaTrainer:
         return result
 
 
-    def train_epoch(self): return self._run_epoch(self.train_loader, train=True)
-    def validate(self): return self._run_epoch(self.val_loader, train=False)
-    def test(self): return self._run_epoch(self.test_loader, train=False)
+    def train_epoch(self): return self._run_epoch(self.train_loader, mode='train')
+    def validate(self): return self._run_epoch(self.val_loader, mode='val')
+    def test(self): return self._run_epoch(self.test_loader, mode='test')
 
     # ------------------- Trainer Loop -------------------
     def train(self):
