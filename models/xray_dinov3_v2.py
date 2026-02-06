@@ -349,10 +349,17 @@ class TraumaNetDINOv3(nn.Module):
         topk_features = self.topk_selector(patch_tokens)
 
         # 融合图像特征和临床特征
-        if self.use_clinical and clinical is not None and clinical.numel() > 0:
-            clinical_features = self.clinical_encoder(clinical)
+        if self.use_clinical:
+            # 模型配置为使用临床特征，feature_fusion期望4*embed_dim输入
+            if clinical is not None and clinical.numel() > 0:
+                clinical_features = self.clinical_encoder(clinical)
+            else:
+                # 临床数据缺失时，使用零向量代替（保持维度一致）
+                B = cls_features.shape[0]
+                clinical_features = torch.zeros(B, self.embed_dim, device=cls_features.device, dtype=cls_features.dtype)
             fused_features = self.feature_fusion(torch.cat([cls_features, seg_features, topk_features, clinical_features], dim=-1))
         else:
+            # 模型未配置临床特征，feature_fusion期望3*embed_dim输入
             fused_features = self.feature_fusion(torch.cat([cls_features, seg_features, topk_features], dim=-1))
 
         cls_logits = self.classification_head(fused_features)
