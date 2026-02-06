@@ -255,15 +255,44 @@ class PatchBasedSegmentationHead(nn.Module):
 
 
 # -----------------------------
+# 临床特征编码器
+# -----------------------------
+class ClinicalEncoder(nn.Module):
+    """将临床特征编码为与图像特征相同维度的向量"""
+    def __init__(self, num_features: int, embed_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(num_features, embed_dim // 2),
+            nn.LayerNorm(embed_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim // 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
+# -----------------------------
 # 主模型
 # -----------------------------
 class TraumaNetDINOv3(nn.Module):
     def __init__(self, cfg_path: str, pretrained_path: str = None, task_names: List[str] = None,
                  seg_organ_names: List[str] = None, img_size: int = 512, use_n_blocks: int = 4,
-                 top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True):
+                 top_k_ratio: float = 0.2, dropout: float = 0.1, freeze_backbone: bool = True,
+                 num_clinical_features: int = 0, use_clinical: bool = True):
+        """
+        Args:
+            num_clinical_features: 临床特征数量（如age, sex, bmi等）
+            use_clinical: 是否使用临床特征（用于消融实验）
+        """
         super().__init__()
-        self.task_names = task_names 
+        self.task_names = task_names
         self.seg_organ_names = seg_organ_names or self.task_names
+        self.num_clinical_features = num_clinical_features
+        self.use_clinical = use_clinical and num_clinical_features > 0
 
         # Backbone（权重在build_dinov3_backbone中加载）
         self.backbone, self.embed_dim = build_dinov3_backbone(cfg_path, pretrained_path=pretrained_path)
@@ -279,10 +308,23 @@ class TraumaNetDINOv3(nn.Module):
         # Seg-guided + Top-K + Fusion
         self.seg_guided_aggregator = SegmentationGuidedAggregator(embed_dim=self.embed_dim, seg_organ_names=self.seg_organ_names, top_k_ratio=top_k_ratio,img_size=img_size)
         self.topk_selector = TopKPatchSelector(embed_dim=self.embed_dim)
-        self.feature_fusion = nn.Sequential(nn.Linear(self.embed_dim*3, self.embed_dim),
-                                            nn.LayerNorm(self.embed_dim),
-                                            nn.GELU(),
-                                            nn.Dropout(dropout))
+
+        # 临床特征编码器（可选）
+        if self.use_clinical:
+            self.clinical_encoder = ClinicalEncoder(num_clinical_features, self.embed_dim, dropout)
+            # 融合层：图像特征(3*embed_dim) + 临床特征(embed_dim)
+            self.feature_fusion = nn.Sequential(nn.Linear(self.embed_dim*4, self.embed_dim),
+                                                nn.LayerNorm(self.embed_dim),
+                                                nn.GELU(),
+                                                nn.Dropout(dropout))
+            print(f"[INFO] 启用临床特征融合，特征数: {num_clinical_features}")
+        else:
+            self.clinical_encoder = None
+            self.feature_fusion = nn.Sequential(nn.Linear(self.embed_dim*3, self.embed_dim),
+                                                nn.LayerNorm(self.embed_dim),
+                                                nn.GELU(),
+                                                nn.Dropout(dropout))
+            print(f"[INFO] 未使用临床特征")
 
         # Classification & Segmentation heads
         self.classification_head = AttentionClassificationHead(embed_dim=self.embed_dim, task_names=self.task_names)
@@ -293,14 +335,25 @@ class TraumaNetDINOv3(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, clinical: torch.Tensor = None):
+        """
+        Args:
+            x: 图像 [B, C, H, W]
+            clinical: 临床特征 [B, num_clinical_features]，可选
+        """
         layer_outputs = self.backbone.get_intermediate_layers(x, n=self.use_n_blocks, return_class_token=True)
         cls_features, patch_tokens = self.feature_aggregator(layer_outputs)
         cls_features = self.dim_reduction(cls_features)
 
         seg_features, aux_seg_logits = self.seg_guided_aggregator(patch_tokens)
         topk_features = self.topk_selector(patch_tokens)
-        fused_features = self.feature_fusion(torch.cat([cls_features, seg_features, topk_features], dim=-1))
+
+        # 融合图像特征和临床特征
+        if self.use_clinical and clinical is not None and clinical.numel() > 0:
+            clinical_features = self.clinical_encoder(clinical)
+            fused_features = self.feature_fusion(torch.cat([cls_features, seg_features, topk_features, clinical_features], dim=-1))
+        else:
+            fused_features = self.feature_fusion(torch.cat([cls_features, seg_features, topk_features], dim=-1))
 
         cls_logits = self.classification_head(fused_features)
         seg_logits = self.seg_head(patch_tokens)

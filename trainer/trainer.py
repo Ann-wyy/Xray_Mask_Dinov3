@@ -81,10 +81,22 @@ class TraumaTrainer:
     # ------------------- Dataloader / Model / Optimizer -------------------
     def _create_dataloaders(self):
         train_transform = RandomFlipRotate2D(flip_prob=0.5, max_angle=15)
+
+        # 获取临床特征配置
+        clinical_features = getattr(self.config.data, 'clinical_features', None)
+        if clinical_features:
+            clinical_features = list(clinical_features)
+            self.logger.info(f"使用临床特征: {clinical_features}")
+
         dataset_kwargs = {
-            'config':self.config,
+            'config': self.config,
             'image_dir': getattr(self.config.data, 'image_dir', None),
             'mask_dir': getattr(self.config.data, 'mask_dir', None),
+            'target_shape': self.config.data.target_shape,
+            'use_preprocessed': getattr(self.config.data, 'use_preprocessed', False),
+            'single_mask': getattr(self.config.data, 'single_mask', True),
+            'mask_key': getattr(self.config.data, 'mask_key', 'bone'),
+            'clinical_features': clinical_features,
         }
         train_dataset = XrayBoneDataset(label_file=self.config.data.train_dataset,
                                         mode='train', transform=train_transform, **dataset_kwargs)
@@ -110,12 +122,19 @@ class TraumaTrainer:
         freeze_backbone = getattr(self.config.model, 'freeze_backbone', False)
         use_n_blocks = getattr(self.config.model, 'use_n_blocks', 4)
 
+        # 临床特征配置
+        clinical_features = getattr(self.config.data, 'clinical_features', None)
+        num_clinical_features = len(clinical_features) if clinical_features else 0
+        use_clinical = getattr(self.config.model, 'use_clinical', True)
+
         task_names = list(self.config.model.num_classes.keys()) if hasattr(self.config.model, 'num_classes') else None
         seg_organ_names = list(self.config.model.seg_organs) if hasattr(self.config.model, 'seg_organs') else None
 
         self.logger.info(f"模型类型: DINOv3, ViT架构: {cfg_path}")
         if task_names: self.logger.info(f"分类任务: {task_names}")
         if seg_organ_names: self.logger.info(f"分割器官: {seg_organ_names}")
+        if num_clinical_features > 0:
+            self.logger.info(f"临床特征数量: {num_clinical_features}, 使用临床特征: {use_clinical}")
 
         model = TraumaNetDINOv3(
             cfg_path=cfg_path,
@@ -126,7 +145,9 @@ class TraumaTrainer:
             use_n_blocks=use_n_blocks,
             top_k_ratio=top_k_ratio,
             dropout=dropout,
-            freeze_backbone=freeze_backbone
+            freeze_backbone=freeze_backbone,
+            num_clinical_features=num_clinical_features,
+            use_clinical=use_clinical
         )
         return model
 
@@ -201,6 +222,13 @@ class TraumaTrainer:
             cls_targets = {k:v.to(self.device) for k,v in batch['labels'].items()}
             seg_targets = {k:v.to(self.device) for k,v in batch['masks'].items()}
 
+            # 获取临床特征（如果有）
+            clinical = batch.get('clinical', None)
+            if clinical is not None and clinical.numel() > 0:
+                clinical = clinical.to(self.device)
+            else:
+                clinical = None
+
             # 生成 patch-level target
             patch_targets = {}
             for k, mask in seg_targets.items():
@@ -213,7 +241,7 @@ class TraumaTrainer:
             self.optimizer.zero_grad()
             if mode == 'train' and self.use_amp:
                 with torch.amp.autocast('cuda'):
-                    outputs = self.model(images)
+                    outputs = self.model(images, clinical=clinical)
 
                     # 调试：检查模型输出
                     if batch_idx == 0:
@@ -230,7 +258,7 @@ class TraumaTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                outputs = self.model(images)
+                outputs = self.model(images, clinical=clinical)
 
                 # 调试：检查模型输出（非AMP分支）
                 if batch_idx == 0:
