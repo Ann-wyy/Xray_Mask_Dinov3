@@ -8,6 +8,11 @@ from PIL import Image
 from monai.transforms import Resize as MonaiResize
 from torchvision import transforms
 import random
+try:
+    import nibabel as nib
+    HAS_NIBABEL = True
+except ImportError:
+    HAS_NIBABEL = False
 
 class RandomFlipRotate2D:
     """
@@ -186,10 +191,35 @@ class XrayBoneDataset(Dataset):
         if patient_id in self.image_path_map:
             path = self.image_path_map[patient_id]
         elif self.image_dir is not None:
-            path = os.path.join(self.image_dir, f"{patient_id}.png")
+            # 尝试多种格式
+            for ext in ['.png', '.jpg', '.jpeg', '.nii.gz', '.nii']:
+                candidate = os.path.join(self.image_dir, f"{patient_id}{ext}")
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            else:
+                path = os.path.join(self.image_dir, f"{patient_id}.png")
         else:
             raise ValueError(f"无法确定患者 {patient_id} 的图像路径：image_dir未设置且CSV中无img_path列")
-        image = np.array(Image.open(path).convert('L'), dtype=np.float32)
+
+        # 根据文件类型加载图像
+        if path.endswith('.nii.gz') or path.endswith('.nii'):
+            if not HAS_NIBABEL:
+                raise ImportError("需要安装nibabel来读取NIfTI文件: pip install nibabel")
+            nii = nib.load(path)
+            image = nii.get_fdata().astype(np.float32)
+            # NIfTI可能是3D的，取第一个slice或squeeze
+            if image.ndim == 3:
+                if image.shape[2] == 1:
+                    image = image[:, :, 0]
+                else:
+                    # 取中间slice
+                    image = image[:, :, image.shape[2] // 2]
+            elif image.ndim > 3:
+                image = image[:, :, 0, 0]
+        else:
+            # PNG/JPEG格式
+            image = np.array(Image.open(path).convert('L'), dtype=np.float32)
 
         if not self.use_preprocessed:
             # 简单归一化到 [0,1]
@@ -207,24 +237,58 @@ class XrayBoneDataset(Dataset):
         加载mask：支持单一骨骼mask或多器官mask字典
         - single_mask=True: 返回单个np.ndarray (H,W)
         - single_mask=False: 返回字典 {organ: np.ndarray (H,W)}
+        支持格式：npz, png, nii.gz, nii
         """
         # 确定mask路径
         if patient_id in self.mask_path_map:
             # CSV中提供了完整路径
             given_path = self.mask_path_map[patient_id]
-            if given_path.endswith('.npz'):
+            # 直接使用给定路径
+            if given_path.endswith('.nii.gz') or given_path.endswith('.nii'):
+                nii_path = given_path
+                npz_path = None
+                png_path = None
+            elif given_path.endswith('.npz'):
                 npz_path = given_path
                 png_path = given_path.replace('.npz', '.png')
+                nii_path = None
             else:
                 png_path = given_path
                 npz_path = given_path.replace('.png', '.npz')
+                nii_path = None
         elif self.mask_dir is not None:
             npz_path = os.path.join(self.mask_dir, f"{patient_id}.npz")
             png_path = os.path.join(self.mask_dir, f"{patient_id}.png")
+            nii_gz_path = os.path.join(self.mask_dir, f"{patient_id}.nii.gz")
+            nii_path = os.path.join(self.mask_dir, f"{patient_id}.nii")
+            # 确定实际存在的nii路径
+            if os.path.exists(nii_gz_path):
+                nii_path = nii_gz_path
+            elif os.path.exists(nii_path):
+                pass  # 使用nii_path
+            else:
+                nii_path = None
         else:
             raise ValueError(f"无法确定患者 {patient_id} 的mask路径：mask_dir未设置且CSV中无mask_path列")
 
-        if os.path.exists(npz_path):
+        # 按优先级加载：nii.gz > npz > png
+        if nii_path and os.path.exists(nii_path):
+            # 从NIfTI加载
+            if not HAS_NIBABEL:
+                raise ImportError("需要安装nibabel来读取NIfTI文件: pip install nibabel")
+            nii = nib.load(nii_path)
+            mask = nii.get_fdata().astype(np.float32)
+            # 处理3D数据
+            if mask.ndim == 3:
+                if mask.shape[2] == 1:
+                    mask = mask[:, :, 0]
+                else:
+                    mask = mask[:, :, mask.shape[2] // 2]
+            elif mask.ndim > 3:
+                mask = mask[:, :, 0, 0]
+            mask = (mask > 0.5).astype(np.int64)  # 二值化
+            mask_dict = {self.mask_key: mask}
+        elif npz_path and os.path.exists(npz_path):
             # 从.npz加载
             data = np.load(npz_path, allow_pickle=True)
             if 'masks' in data:
@@ -234,13 +298,14 @@ class XrayBoneDataset(Dataset):
             else:
                 # 尝试直接使用第一个key
                 mask_dict = {k: data[k] for k in data.keys()}
-        elif os.path.exists(png_path):
+        elif png_path and os.path.exists(png_path):
             # 从.png加载单一mask
             mask = np.array(Image.open(png_path).convert('L'), dtype=np.float32)
             mask = (mask > 127).astype(np.int64)  # 二值化
             mask_dict = {self.mask_key: mask}
         else:
-            raise FileNotFoundError(f"Mask文件不存在: {npz_path} 或 {png_path}")
+            paths = [p for p in [nii_path, npz_path, png_path] if p]
+            raise FileNotFoundError(f"Mask文件不存在: {paths}")
 
         if self.single_mask:
             # 返回单一mask
